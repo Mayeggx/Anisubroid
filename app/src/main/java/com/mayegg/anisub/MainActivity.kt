@@ -1,7 +1,8 @@
 ﻿package com.mayegg.anisub
 
-import android.content.Intent
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -110,7 +111,7 @@ data class MainUiState(
     val loading: Boolean = false,
     val folderLabel: String = "未选择文件夹",
     val subtitleSource: SubtitleSource = SubtitleSource.Jimaku,
-    val matchMode: MatchMode = MatchMode.Auto,
+    val matchMode: MatchMode = MatchMode.Candidate,
     val videos: List<VideoItem> = emptyList(),
     val logs: List<MatchLogItem> = emptyList(),
     val pendingCandidates: List<SubtitleCandidate> = emptyList(),
@@ -490,7 +491,7 @@ private fun AppScreen(
                     VideoRow(
                         item = item,
                         onMatchSubtitle = { onMatchSubtitle(item.id) },
-                        onPlayVideo = { playVideoWithMpv(context, item.uri) },
+                        onPlayVideo = { playVideoWithMpv(context, item.uri, item.folderUri, item.title) },
                     )
                 }
             }
@@ -684,13 +685,31 @@ private fun VideoRow(
     }
 }
 
-private fun playVideoWithMpv(context: android.content.Context, uri: Uri): Boolean {
+private fun playVideoWithMpv(
+    context: android.content.Context,
+    uri: Uri,
+    folderUri: Uri,
+    videoTitle: String,
+): Boolean {
+    val subtitleUri = findMatchingSubtitleUri(context, folderUri, videoTitle)
+    val subtitleUris = subtitleUri?.let { arrayOf(it) }
     val openIntent =
         Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "video/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             setPackage("is.xyz.mpv")
+            if (subtitleUris != null) {
+                putExtra("subs", subtitleUris)
+                putExtra("subs.enable", subtitleUris)
+            }
+            clipData =
+                buildClipData(
+                    context = context,
+                    videoUri = uri,
+                    subtitleUri = subtitleUri,
+                )
         }
+    grantReadPermissionForMpv(context, uri, subtitleUri)
     return runCatching {
         context.startActivity(openIntent)
         true
@@ -707,4 +726,81 @@ private fun playVideoWithMpv(context: android.content.Context, uri: Uri): Boolea
     }
 }
 
+private fun findMatchingSubtitleUri(
+    context: android.content.Context,
+    folderUri: Uri,
+    videoTitle: String,
+): Uri? {
+    val folder = DocumentFile.fromTreeUri(context, folderUri) ?: return null
+    val subDir = folder.findFile("sub")?.takeIf { it.isDirectory } ?: return null
+    val targetBase = stripExtension(videoTitle).lowercase(Locale.ROOT)
+    val candidates =
+        subDir
+            .listFiles()
+            .asSequence()
+            .filter { it.isFile }
+            .mapNotNull { file ->
+                val name = file.name ?: return@mapNotNull null
+                val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                if (!isSubtitleExtension(ext)) return@mapNotNull null
+                if (stripExtension(name).lowercase(Locale.ROOT) != targetBase) return@mapNotNull null
+                subtitlePriority(ext) to file.uri
+            }
+            .sortedBy { it.first }
+            .toList()
+    return candidates.firstOrNull()?.second
+}
+
+private fun buildClipData(
+    context: android.content.Context,
+    videoUri: Uri,
+    subtitleUri: Uri?,
+): ClipData {
+    return ClipData.newUri(context.contentResolver, "video", videoUri).apply {
+        if (subtitleUri != null) {
+            addItem(ClipData.Item(subtitleUri))
+        }
+    }
+}
+
+private fun grantReadPermissionForMpv(
+    context: android.content.Context,
+    videoUri: Uri,
+    subtitleUri: Uri?,
+) {
+    runCatching {
+        context.grantUriPermission(
+            "is.xyz.mpv",
+            videoUri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+        )
+        subtitleUri?.let {
+            context.grantUriPermission(
+                "is.xyz.mpv",
+                it,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+    }
+}
+
+private fun isSubtitleExtension(ext: String): Boolean =
+    ext == "srt" || ext == "ass" || ext == "ssa" || ext == "vtt"
+
+private fun subtitlePriority(ext: String): Int =
+    when (ext) {
+        "srt" -> 0
+        "ass" -> 1
+        "ssa" -> 2
+        "vtt" -> 3
+        else -> Int.MAX_VALUE
+    }
+
+private fun stripExtension(name: String): String {
+    val dot = name.lastIndexOf('.')
+    return if (dot <= 0) name else name.substring(0, dot)
+}
+
 private fun episodeLabel(episode: Int?): String = if (episode == null) "电影" else "第${episode}集"
+
+
