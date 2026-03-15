@@ -1,6 +1,6 @@
 param(
-    [switch]$InstallApk,
-    [switch]$LaunchApp,
+    [bool]$InstallApk = $true,
+    [bool]$LaunchApp = $true,
     [switch]$CaptureLog = $true
 )
 
@@ -46,11 +46,15 @@ if (-not $onlineDevices) {
 if ($InstallApk) {
     Write-Output "Installing debug APK..."
     & adb install -r $apkPath
+} else {
+    Write-Output "Skip installing APK (InstallApk=false)."
 }
 
 if ($LaunchApp) {
     Write-Output "Launching app..."
     & adb shell am start -n $mainActivity
+} else {
+    Write-Output "Skip launching app (LaunchApp=false)."
 }
 
 if ($CaptureLog) {

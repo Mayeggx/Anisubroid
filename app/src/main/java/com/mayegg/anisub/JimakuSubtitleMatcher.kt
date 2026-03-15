@@ -11,7 +11,6 @@ import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.regex.PatternSyntaxException
@@ -37,7 +36,7 @@ class JimakuSubtitleMatcher(
             Log.i(TAG, "entry matched id=${entry.id}, title=${entry.title}")
             val download = findBestDownload(entry.id, parsed)
             Log.i(TAG, "download matched name=${download.name}, url=${download.url}")
-            val saved = saveToVideoFolder(video.folderUri, download.url)
+            val saved = saveToVideoFolder(video.folderUri, video.title, download)
             Log.i(TAG, "saved subtitle file=$saved")
             SubtitleDownloadResult(savedFileName = saved)
         }
@@ -83,19 +82,32 @@ class JimakuSubtitleMatcher(
 
     private fun saveToVideoFolder(
         folderUri: Uri,
-        downloadUrl: String,
+        videoTitle: String,
+        download: DownloadItem,
     ): String {
         val parent = DocumentFile.fromTreeUri(context, folderUri)
             ?: error("无法访问视频所在文件夹。")
-        val outputName = decodeFileNameFromUrl(downloadUrl)
-        parent.findFile(outputName)?.delete()
+
+        val subFolder = parent.findFile("sub")?.takeIf { it.isDirectory }
+            ?: parent.createDirectory("sub")
+            ?: error("无法创建 sub 目录。")
+
+        val outputName = buildSubtitleName(videoTitle, download.name)
+        subFolder.findFile(outputName)?.delete()
 
         val newFile =
-            parent.createFile(guessMimeType(outputName), outputName)
+            subFolder.createFile(guessMimeType(outputName), outputName)
                 ?: error("无法在目标文件夹创建字幕文件。")
 
-        downloadToUri(downloadUrl, newFile.uri)
-        return outputName
+        downloadToUri(download.url, newFile.uri)
+        return "sub/$outputName"
+    }
+
+    private fun buildSubtitleName(videoTitle: String, sourceSubtitleName: String): String {
+        val videoBase = videoTitle.substringBeforeLast('.', videoTitle)
+        val ext = sourceSubtitleName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        val suffix = if (ext.isBlank()) "srt" else ext
+        return "$videoBase.$suffix"
     }
 
     private fun parseIndexEntries(html: String): List<EntryItem> {
@@ -238,11 +250,6 @@ class JimakuSubtitleMatcher(
 
     private fun decodeHtml(text: String): String =
         Html.fromHtml(text, Html.FROM_HTML_MODE_LEGACY).toString()
-
-    private fun decodeFileNameFromUrl(url: String): String {
-        val raw = url.substringAfterLast('/')
-        return URLDecoder.decode(raw, StandardCharsets.UTF_8.name())
-    }
 
     private fun guessMimeType(name: String): String {
         val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
