@@ -1,5 +1,23 @@
 ﻿# Anisubroid Handoff
 
+## 0. 本轮追加需求（2026-03-16，播放按钮 + 状态初始化）
+- 需求：
+  - “打开文件夹”按钮更名为“打开”。
+  - 在“匹配并下载字幕”旁新增“播放”按钮，用 mpv 打开当前视频。
+  - 取消视频缩略图显示。
+  - 打开文件夹初始化视频列表时，检查当前目录 sub/ 下是否已有同名字幕；若存在，状态显示“已存在对应字幕”。
+- 已完成：
+  - 顶栏按钮文案已从“打开文件夹”改为“打开”。
+  - 每个视频条目新增“播放”按钮：
+    - 优先使用 is.xyz.mpv 包名启动播放。
+    - 若 mpv 不可用，自动回退到系统 ACTION_VIEW 播放。
+  - 删除视频缩略图加载与渲染逻辑（移除 MediaMetadataRetriever 预览流程）。
+  - 视频扫描后会读取当前目录 sub/，按同名基名匹配 srt/ass/ssa/vtt，命中则初始化状态为“已存在对应字幕”。
+- 本轮验证：
+  - scripts/build-debug.ps1 执行成功（exit code 0）。
+  - adb install -r app/build/outputs/apk/debug/app-debug.apk 返回 Success。
+  - adb shell am start -n com.mayegg.anisub/.MainActivity 已成功投递到前台实例。
+  - adb shell pm list packages 确认 mpv 包名：is.xyz.mpv。
 ## 0. 本轮追加需求（2026-03-16，来源切换 + EdaTribe）
 - 需求：
   - 新增 cc.edatribe.com 字幕 matcher（目录型站点，先匹配 TV series 目录，再按集数匹配字幕）。
@@ -99,3 +117,5 @@
   - 若匹配到多个候选字幕，弹出“候选字幕确认”对话框供用户二次选择。
   - 若仅一个候选，则直接下载。
 - 顶栏调整：去掉左上角应用名，仅显示当前目录名称；保留来源选择和日志入口。
+
+

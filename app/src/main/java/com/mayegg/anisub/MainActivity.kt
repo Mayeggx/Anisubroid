@@ -1,8 +1,7 @@
 ﻿package com.mayegg.anisub
 
 import android.content.Intent
-import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
+import android.content.ActivityNotFoundException
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -11,8 +10,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,10 +18,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -34,22 +29,16 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,7 +54,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -196,13 +184,24 @@ class MainViewModel(
             val videos =
                 videoFiles
                     .sortedBy { it.file.name.orEmpty().lowercase(Locale.ROOT) }
-                    .map { item ->
-                        VideoItem(
-                            id = item.file.uri.toString(),
-                            uri = item.file.uri,
-                            folderUri = item.parent.uri,
-                            title = item.file.name ?: item.file.uri.lastPathSegment.orEmpty(),
-                        )
+                    .let { scanned ->
+                        val subtitleBases = collectExistingSubtitleBaseNames(scanned.firstOrNull()?.parent)
+                        scanned.map { item ->
+                            val title = item.file.name ?: item.file.uri.lastPathSegment.orEmpty()
+                            val subtitleStatus =
+                                if (subtitleBases.contains(baseName(title).lowercase(Locale.ROOT))) {
+                                    "已存在对应字幕"
+                                } else {
+                                    "未匹配"
+                                }
+                            VideoItem(
+                                id = item.file.uri.toString(),
+                                uri = item.file.uri,
+                                folderUri = item.parent.uri,
+                                title = title,
+                                subtitleStatus = subtitleStatus,
+                            )
+                        }
                     }
 
             _uiState.update {
@@ -386,6 +385,34 @@ class MainViewModel(
             lower.endsWith(".webm") ||
             lower.endsWith(".m4v")
     }
+
+    private fun collectExistingSubtitleBaseNames(parent: DocumentFile?): Set<String> {
+        if (parent == null || !parent.isDirectory) return emptySet()
+        val subDir = parent.findFile("sub") ?: return emptySet()
+        if (!subDir.isDirectory) return emptySet()
+        return subDir.listFiles()
+            .asSequence()
+            .filter { it.isFile }
+            .mapNotNull { file ->
+                val name = file.name ?: return@mapNotNull null
+                if (!isSubtitleFileName(name)) return@mapNotNull null
+                baseName(name).lowercase(Locale.ROOT)
+            }
+            .toSet()
+    }
+
+    private fun isSubtitleFileName(name: String): Boolean {
+        val lower = name.lowercase(Locale.ROOT)
+        return lower.endsWith(".srt") ||
+            lower.endsWith(".ass") ||
+            lower.endsWith(".ssa") ||
+            lower.endsWith(".vtt")
+    }
+
+    private fun baseName(name: String): String {
+        val dot = name.lastIndexOf('.')
+        return if (dot <= 0) name else name.substring(0, dot)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -400,6 +427,7 @@ private fun AppScreen(
     onDismissCandidates: () -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     Scaffold(
         topBar = {
             TopAppBar(
@@ -424,7 +452,7 @@ private fun AppScreen(
                         onSelect = onSelectSubtitleSource,
                     )
                     TextButton(onClick = onPickFolder) {
-                        Text("打开文件夹")
+                        Text("打开")
                     }
                 },
             )
@@ -459,7 +487,11 @@ private fun AppScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(state.videos, key = { it.id }) { item ->
-                    VideoRow(item = item, onMatchSubtitle = { onMatchSubtitle(item.id) })
+                    VideoRow(
+                        item = item,
+                        onMatchSubtitle = { onMatchSubtitle(item.id) },
+                        onPlayVideo = { playVideoWithMpv(context, item.uri) },
+                    )
                 }
             }
         }
@@ -607,12 +639,8 @@ private fun CandidateDialog(
 private fun VideoRow(
     item: VideoItem,
     onMatchSubtitle: () -> Unit,
+    onPlayVideo: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val thumbnail by produceState<ImageBitmap?>(initialValue = null, key1 = item.id) {
-        value = loadVideoThumbnail(context as ComponentActivity, item.uri)
-    }
-
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(10.dp),
@@ -623,7 +651,6 @@ private fun VideoRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ThumbnailView(bitmap = thumbnail)
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(item.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(
@@ -634,57 +661,50 @@ private fun VideoRow(
                 }
             }
 
-            Button(onClick = onMatchSubtitle, enabled = !item.matching, modifier = Modifier.fillMaxWidth()) {
-                Text(if (item.matching) "匹配中..." else "匹配并下载字幕")
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThumbnailView(bitmap: ImageBitmap?) {
-    Surface(
-        modifier = Modifier.size(120.dp, 68.dp),
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-    ) {
-        if (bitmap == null) {
-            Box(
-                modifier = Modifier.fillMaxSize().background(Color(0x33000000)),
-                contentAlignment = Alignment.Center,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("无预览", style = MaterialTheme.typography.labelMedium)
+                Button(
+                    onClick = onMatchSubtitle,
+                    enabled = !item.matching,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (item.matching) "匹配中..." else "匹配并下载字幕")
+                }
+                Button(
+                    onClick = onPlayVideo,
+                    enabled = !item.matching,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("播放")
+                }
             }
-        } else {
-            Image(
-                bitmap = bitmap,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
         }
     }
 }
 
-private suspend fun loadVideoThumbnail(activity: ComponentActivity, uri: Uri): ImageBitmap? =
-    withContext(Dispatchers.IO) {
+private fun playVideoWithMpv(context: android.content.Context, uri: Uri): Boolean {
+    val openIntent =
+        Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            setPackage("is.xyz.mpv")
+        }
+    return runCatching {
+        context.startActivity(openIntent)
+        true
+    }.getOrElse {
+        if (it !is ActivityNotFoundException) return@getOrElse false
         runCatching {
-            val retriever = MediaMetadataRetriever()
-            activity.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                retriever.setDataSource(pfd.fileDescriptor)
-            } ?: return@runCatching null
-
-            val frame = retriever.frameAtTime ?: retriever.getFrameAtTime(0)
-            retriever.release()
-            frame?.toScaledBitmap()?.asImageBitmap()
-        }.getOrNull()
+            val fallback = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(fallback)
+            true
+        }.getOrDefault(false)
     }
-
-private fun Bitmap.toScaledBitmap(): Bitmap {
-    val targetHeight = 200
-    val ratio = width.toFloat() / height.toFloat()
-    val targetWidth = (targetHeight * ratio).toInt().coerceAtLeast(1)
-    return Bitmap.createScaledBitmap(this, targetWidth, targetHeight, true)
 }
 
 private fun episodeLabel(episode: Int?): String = if (episode == null) "电影" else "第${episode}集"
