@@ -1,4 +1,4 @@
-﻿plugins {
+plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
@@ -11,7 +11,7 @@ android {
         applicationId = "com.mayegg.anisub"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        versionCode = 2
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
