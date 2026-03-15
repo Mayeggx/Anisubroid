@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -48,7 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -72,7 +73,7 @@ class MainActivity : ComponentActivity() {
 
             val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
-                    persistReadPermission(it)
+                    persistReadWritePermission(it)
                     vm.loadFolder(this, it)
                 }
             }
@@ -85,9 +86,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun persistReadPermission(uri: Uri) {
+    private fun persistReadWritePermission(uri: Uri) {
         try {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
         } catch (_: SecurityException) {
         }
     }
@@ -96,8 +100,10 @@ class MainActivity : ComponentActivity() {
 data class VideoItem(
     val id: String,
     val uri: Uri,
+    val folderUri: Uri,
     val title: String,
     val subtitleStatus: String = "未匹配",
+    val matching: Boolean = false,
 )
 
 data class MainUiState(
@@ -107,9 +113,15 @@ data class MainUiState(
     val message: String = "请选择视频文件夹。",
 )
 
-class MainViewModel : ViewModel() {
+class MainViewModel(
+    application: android.app.Application,
+) : AndroidViewModel(application) {
+    companion object {
+        private const val TAG = "AnisubroidMain"
+    }
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
+    private val matcher = JimakuSubtitleMatcher(application)
 
     fun loadFolder(activity: ComponentActivity, treeUri: Uri) {
         _uiState.update {
@@ -124,12 +136,13 @@ class MainViewModel : ViewModel() {
             val videoFiles = collectVideoFiles(activity, treeUri)
             val videos =
                 videoFiles
-                    .sortedBy { it.name.orEmpty().lowercase(Locale.ROOT) }
-                    .map { file ->
+                    .sortedBy { it.file.name.orEmpty().lowercase(Locale.ROOT) }
+                    .map { item ->
                         VideoItem(
-                            id = file.uri.toString(),
-                            uri = file.uri,
-                            title = file.name ?: file.uri.lastPathSegment.orEmpty(),
+                            id = item.file.uri.toString(),
+                            uri = item.file.uri,
+                            folderUri = item.parent.uri,
+                            title = item.file.name ?: item.file.uri.lastPathSegment.orEmpty(),
                         )
                     }
 
@@ -144,37 +157,67 @@ class MainViewModel : ViewModel() {
     }
 
     fun matchSubtitle(videoId: String) {
+        val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
         _uiState.update { state ->
             state.copy(
                 videos =
                     state.videos.map { item ->
                         if (item.id == videoId) {
-                            item.copy(subtitleStatus = "匹配下载暂未实现（预留网页检索）")
+                            item.copy(subtitleStatus = "正在匹配并下载字幕...", matching = true)
                         } else {
                             item
                         }
                     },
-                message = "字幕匹配下载逻辑暂未实现，入口已预留。",
+                message = "正在从 Jimaku 匹配：${target.title}",
             )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val output =
+                runCatching { matcher.matchAndDownload(target) }
+                    .fold(
+                        onSuccess = { result ->
+                            "匹配成功：${result.savedFileName}"
+                        },
+                        onFailure = { error ->
+                            Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
+                            "匹配失败：${error.message ?: "未知错误"}"
+                        },
+                    )
+
+            _uiState.update { state ->
+                state.copy(
+                    videos =
+                        state.videos.map { item ->
+                            if (item.id == videoId) item.copy(subtitleStatus = output, matching = false) else item
+                        },
+                    message = output,
+                )
+            }
         }
     }
 
     private fun resolveFolderLabel(activity: ComponentActivity, uri: Uri): String =
         DocumentFile.fromTreeUri(activity, uri)?.name ?: uri.lastPathSegment ?: uri.toString()
 
-    private fun collectVideoFiles(activity: ComponentActivity, treeUri: Uri): List<DocumentFile> {
+    private fun collectVideoFiles(activity: ComponentActivity, treeUri: Uri): List<ScannedVideo> {
         val root = DocumentFile.fromTreeUri(activity, treeUri) ?: return emptyList()
         return collectRecursively(root)
     }
 
-    private fun collectRecursively(node: DocumentFile): List<DocumentFile> =
+    private fun collectRecursively(node: DocumentFile): List<ScannedVideo> =
         node.listFiles().flatMap { file ->
             when {
                 file.isDirectory -> collectRecursively(file)
-                file.isFile && isVideo(file) -> listOf(file)
+                file.isFile && isVideo(file) -> listOf(ScannedVideo(file = file, parent = node))
                 else -> emptyList()
             }
         }
+
+    private data class ScannedVideo(
+        val file: DocumentFile,
+        val parent: DocumentFile,
+    )
 
     private fun isVideo(file: DocumentFile): Boolean {
         if (file.type?.startsWith("video/") == true) return true
@@ -286,8 +329,8 @@ private fun VideoRow(
                 }
             }
 
-            Button(onClick = onMatchSubtitle, modifier = Modifier.fillMaxWidth()) {
-                Text("匹配并下载字幕")
+            Button(onClick = onMatchSubtitle, enabled = !item.matching, modifier = Modifier.fillMaxWidth()) {
+                Text(if (item.matching) "匹配中..." else "匹配并下载字幕")
             }
         }
     }
