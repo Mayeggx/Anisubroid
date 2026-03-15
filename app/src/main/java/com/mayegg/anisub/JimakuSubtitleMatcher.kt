@@ -19,7 +19,7 @@ import kotlin.math.max
 data class SubtitleDownloadResult(
     val savedFileName: String,
     val seriesTitle: String,
-    val episode: Int,
+    val episode: Int?,
     val originalSubtitleName: String,
 )
 
@@ -30,6 +30,28 @@ class JimakuSubtitleMatcher(
         private const val TAG = "JimakuMatcher"
     }
 
+    override suspend fun findCandidates(video: VideoItem): List<SubtitleCandidate> =
+        withContext(Dispatchers.IO) {
+            val parsed = SubtitleNameHeuristics.parseVideo(video.title)
+            val entry = findBestEntry(parsed)
+            findEpisodeCandidates(entry, parsed)
+        }
+
+    override suspend fun downloadCandidate(
+        video: VideoItem,
+        candidate: SubtitleCandidate,
+    ): SubtitleDownloadResult =
+        withContext(Dispatchers.IO) {
+            val download = DownloadItem(url = candidate.downloadUrl, name = candidate.originalSubtitleName)
+            val saved = saveToVideoFolder(video.folderUri, video.title, download)
+            SubtitleDownloadResult(
+                savedFileName = saved,
+                seriesTitle = candidate.seriesTitle,
+                episode = candidate.episode,
+                originalSubtitleName = candidate.originalSubtitleName,
+            )
+        }
+
     override suspend fun matchAndDownload(video: VideoItem): SubtitleDownloadResult =
         withContext(Dispatchers.IO) {
             Log.i(TAG, "matchAndDownload start title=${video.title}")
@@ -37,7 +59,7 @@ class JimakuSubtitleMatcher(
             Log.i(TAG, "parsed title base=${parsed.baseTitle}, season=${parsed.season}, episode=${parsed.episode}, queries=${parsed.queryTitles}")
             val entry = findBestEntry(parsed)
             Log.i(TAG, "entry matched id=${entry.id}, title=${entry.title}")
-            val download = findBestDownload(entry.id, parsed)
+            val download = findBestDownload(entry, parsed)
             Log.i(TAG, "download matched name=${download.name}, url=${download.url}")
             val saved = saveToVideoFolder(video.folderUri, video.title, download)
             Log.i(TAG, "saved subtitle file=$saved")
@@ -68,24 +90,45 @@ class JimakuSubtitleMatcher(
     }
 
     private fun findBestDownload(
-        entryId: String,
+        entry: EntryItem,
         parsed: ParsedVideo,
     ): DownloadItem {
-        val html = getText("https://jimaku.cc/entry/$entryId")
+        val episodeMatches = findEpisodeCandidates(entry, parsed)
+        return episodeMatches
+            .map { DownloadItem(it.downloadUrl, it.originalSubtitleName) }
+            .maxByOrNull { scoreSubtitleFile(parsed, it.name) }
+            ?: error("字幕筛选失败。")
+    }
+
+    private fun findEpisodeCandidates(
+        entry: EntryItem,
+        parsed: ParsedVideo,
+    ): List<SubtitleCandidate> {
+        val html = getText("https://jimaku.cc/entry/${entry.id}")
         val files = parseDownloadItems(html)
         if (files.isEmpty()) error("目标条目内没有可下载字幕文件。")
 
         val episodeMatches =
-            files.filter { item ->
-                val ep = SubtitleNameHeuristics.extractEpisode(item.name)
-                ep == parsed.episode
+            if (parsed.episode != null) {
+                files.filter { item ->
+                    val ep = SubtitleNameHeuristics.extractEpisode(item.name)
+                    ep == parsed.episode
+                }
+            } else {
+                files
             }
-        if (episodeMatches.isEmpty()) {
-            error("已进入条目，但没有匹配到第 ${parsed.episode} 集字幕。")
-        }
+        if (episodeMatches.isEmpty()) error("已进入条目，但没有可用字幕。")
 
-        return episodeMatches.maxByOrNull { scoreSubtitleFile(parsed, it.name) }
-            ?: error("第 ${parsed.episode} 集字幕筛选失败。")
+        return episodeMatches
+            .sortedByDescending { scoreSubtitleFile(parsed, it.name) }
+            .map {
+                SubtitleCandidate(
+                    seriesTitle = entry.title,
+                    episode = parsed.episode,
+                    originalSubtitleName = it.name,
+                    downloadUrl = it.url,
+                )
+            }
     }
 
     private fun saveToVideoFolder(
@@ -287,7 +330,7 @@ private data class DownloadItem(
 data class ParsedVideo(
     val baseTitle: String,
     val season: Int?,
-    val episode: Int,
+    val episode: Int?,
     val queryTitles: List<String>,
 )
 
@@ -305,7 +348,7 @@ object SubtitleNameHeuristics {
     fun parseVideo(name: String): ParsedVideo {
         val stem = removeExtension(name)
         val season = extractSeason(stem)
-        val episode = extractEpisode(stem) ?: error("无法从文件名中识别集数：$name")
+        val episode = extractEpisode(stem)
         val base = cleanBaseTitle(stem)
         if (base.isBlank()) error("无法从文件名中识别剧名：$name")
 

@@ -90,7 +90,10 @@ class MainActivity : ComponentActivity() {
                 state = state,
                 onPickFolder = { folderLauncher.launch(null) },
                 onSelectSubtitleSource = vm::setSubtitleSource,
+                onSelectMatchMode = vm::setMatchMode,
                 onMatchSubtitle = vm::matchSubtitle,
+                onConfirmCandidate = vm::confirmCandidate,
+                onDismissCandidates = vm::dismissCandidates,
             )
         }
     }
@@ -119,8 +122,11 @@ data class MainUiState(
     val loading: Boolean = false,
     val folderLabel: String = "未选择文件夹",
     val subtitleSource: SubtitleSource = SubtitleSource.Jimaku,
+    val matchMode: MatchMode = MatchMode.Auto,
     val videos: List<VideoItem> = emptyList(),
     val logs: List<MatchLogItem> = emptyList(),
+    val pendingCandidates: List<SubtitleCandidate> = emptyList(),
+    val pendingVideoId: String? = null,
     val message: String = "请选择视频文件夹。",
 )
 
@@ -128,7 +134,7 @@ data class MatchLogItem(
     val timestamp: String,
     val source: SubtitleSource,
     val seriesTitle: String,
-    val episode: Int,
+    val episode: Int?,
     val originalFileName: String,
     val renamedFileName: String,
 )
@@ -138,6 +144,13 @@ enum class SubtitleSource(
 ) {
     Jimaku("Jimaku"),
     Edatribe("EdaTribe"),
+}
+
+enum class MatchMode(
+    val label: String,
+) {
+    Auto("自动"),
+    Candidate("候选"),
 }
 
 class MainViewModel(
@@ -156,6 +169,15 @@ class MainViewModel(
             it.copy(
                 subtitleSource = source,
                 message = "当前字幕来源：${source.label}",
+            )
+        }
+    }
+
+    fun setMatchMode(mode: MatchMode) {
+        _uiState.update {
+            it.copy(
+                matchMode = mode,
+                message = "当前匹配模式：${mode.label}",
             )
         }
     }
@@ -195,7 +217,9 @@ class MainViewModel(
 
     fun matchSubtitle(videoId: String) {
         val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
-        val source = _uiState.value.subtitleSource
+        val stateSnapshot = _uiState.value
+        val source = stateSnapshot.subtitleSource
+        val mode = stateSnapshot.matchMode
         _uiState.update { state ->
             state.copy(
                 videos =
@@ -206,7 +230,7 @@ class MainViewModel(
                             item
                         }
                     },
-                message = "正在从 ${source.label} 匹配：${target.title}",
+                message = "正在从 ${source.label} (${mode.label}) 匹配：${target.title}",
             )
         }
 
@@ -216,21 +240,34 @@ class MainViewModel(
                     SubtitleSource.Jimaku -> jimakuMatcher
                     SubtitleSource.Edatribe -> edatribeMatcher
                 }
-            val output =
-                runCatching { matcher.matchAndDownload(target) }
-                    .fold(
-                        onSuccess = { result ->
-                            addLog(
-                                source = source,
-                                result = result,
+            val output = runCatching {
+                if (mode == MatchMode.Auto) {
+                    val result = matcher.matchAndDownload(target)
+                    addLog(source = source, result = result)
+                    "匹配成功：${result.savedFileName}"
+                } else {
+                    val candidates = matcher.findCandidates(target).take(8)
+                    if (candidates.isEmpty()) {
+                        "匹配失败：未找到候选字幕。"
+                    } else if (candidates.size == 1) {
+                        val result = matcher.downloadCandidate(target, candidates.first())
+                        addLog(source = source, result = result)
+                        "匹配成功：${result.savedFileName}"
+                    } else {
+                        _uiState.update { state ->
+                            state.copy(
+                                pendingCandidates = candidates,
+                                pendingVideoId = videoId,
+                                message = "找到 ${candidates.size} 个候选字幕，请确认。",
                             )
-                            "匹配成功：${result.savedFileName}"
-                        },
-                        onFailure = { error ->
-                            Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
-                            "匹配失败：${error.message ?: "未知错误"}"
-                        },
-                    )
+                        }
+                        "找到 ${candidates.size} 个候选字幕，请确认。"
+                    }
+                }
+            }.getOrElse { error ->
+                Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
+                "匹配失败：${error.message ?: "未知错误"}"
+            }
 
             _uiState.update { state ->
                 state.copy(
@@ -241,6 +278,66 @@ class MainViewModel(
                     message = output,
                 )
             }
+        }
+    }
+
+    fun confirmCandidate(index: Int) {
+        val state = _uiState.value
+        val videoId = state.pendingVideoId ?: return
+        val video = state.videos.firstOrNull { it.id == videoId } ?: return
+        val candidate = state.pendingCandidates.getOrNull(index) ?: return
+        val source = state.subtitleSource
+
+        _uiState.update {
+            it.copy(
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
+                videos =
+                    it.videos.map { item ->
+                        if (item.id == videoId) item.copy(subtitleStatus = "正在下载候选字幕...", matching = true) else item
+                    },
+                message = "正在下载已选候选字幕：${candidate.originalSubtitleName}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val matcher: SubtitleMatcher =
+                when (source) {
+                    SubtitleSource.Jimaku -> jimakuMatcher
+                    SubtitleSource.Edatribe -> edatribeMatcher
+                }
+            val output =
+                runCatching { matcher.downloadCandidate(video, candidate) }
+                    .fold(
+                        onSuccess = { result ->
+                            addLog(source = source, result = result)
+                            "匹配成功：${result.savedFileName}"
+                        },
+                        onFailure = { error ->
+                            Log.e(TAG, "Candidate download failed for: ${video.title}", error)
+                            "匹配失败：${error.message ?: "未知错误"}"
+                        },
+                    )
+
+            _uiState.update {
+                it.copy(
+                    videos =
+                        it.videos.map { item ->
+                            if (item.id == videoId) item.copy(subtitleStatus = output, matching = false) else item
+                        },
+                    message = output,
+                )
+            }
+        }
+    }
+
+    fun dismissCandidates() {
+        _uiState.update {
+            it.copy(
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
+                message = "已取消候选选择。",
+            )
         }
     }
 
@@ -267,17 +364,10 @@ class MainViewModel(
 
     private fun collectVideoFiles(activity: ComponentActivity, treeUri: Uri): List<ScannedVideo> {
         val root = DocumentFile.fromTreeUri(activity, treeUri) ?: return emptyList()
-        return collectRecursively(root)
+        return root.listFiles()
+            .filter { it.isFile && isVideo(it) }
+            .map { ScannedVideo(file = it, parent = root) }
     }
-
-    private fun collectRecursively(node: DocumentFile): List<ScannedVideo> =
-        node.listFiles().flatMap { file ->
-            when {
-                file.isDirectory -> collectRecursively(file)
-                file.isFile && isVideo(file) -> listOf(ScannedVideo(file = file, parent = node))
-                else -> emptyList()
-            }
-        }
 
     private data class ScannedVideo(
         val file: DocumentFile,
@@ -304,27 +394,31 @@ private fun AppScreen(
     state: MainUiState,
     onPickFolder: () -> Unit,
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
+    onSelectMatchMode: (MatchMode) -> Unit,
     onMatchSubtitle: (String) -> Unit,
+    onConfirmCandidate: (Int) -> Unit,
+    onDismissCandidates: () -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("Anisubroid", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            text = state.folderLabel,
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    Text(
+                        text = state.folderLabel,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 },
                 actions = {
                     TextButton(onClick = { logVisible = true }) {
                         Text("日志")
                     }
+                    MatchModeDropdown(
+                        selected = state.matchMode,
+                        onSelect = onSelectMatchMode,
+                    )
                     SubtitleSourceDropdown(
                         selected = state.subtitleSource,
                         onSelect = onSelectSubtitleSource,
@@ -377,6 +471,14 @@ private fun AppScreen(
             onDismiss = { logVisible = false },
         )
     }
+
+    if (state.pendingCandidates.isNotEmpty()) {
+        CandidateDialog(
+            candidates = state.pendingCandidates,
+            onDismiss = onDismissCandidates,
+            onSelect = onConfirmCandidate,
+        )
+    }
 }
 
 @Composable
@@ -407,6 +509,33 @@ private fun SubtitleSourceDropdown(
 }
 
 @Composable
+private fun MatchModeDropdown(
+    selected: MatchMode,
+    onSelect: (MatchMode) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Text("模式: ${selected.label}")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            MatchMode.entries.forEach { mode ->
+                DropdownMenuItem(
+                    text = { Text(mode.label) },
+                    onClick = {
+                        expanded = false
+                        onSelect(mode)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun LogDialog(
     logs: List<MatchLogItem>,
     onDismiss: () -> Unit,
@@ -424,7 +553,7 @@ private fun LogDialog(
                 ) {
                     items(logs, key = { "${it.timestamp}-${it.renamedFileName}" }) { item ->
                         Text(
-                            text = "[${item.timestamp}] ${item.source.label} | ${item.seriesTitle} | 第${item.episode}集 | 原文件: ${item.originalFileName} | 改名: ${item.renamedFileName}",
+                            text = "[${item.timestamp}] ${item.source.label} | ${item.seriesTitle} | ${episodeLabel(item.episode)} | 原文件: ${item.originalFileName} | 改名: ${item.renamedFileName}",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -434,6 +563,41 @@ private fun LogDialog(
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text("关闭")
+            }
+        },
+    )
+}
+
+@Composable
+private fun CandidateDialog(
+    candidates: List<SubtitleCandidate>,
+    onDismiss: () -> Unit,
+    onSelect: (Int) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("候选字幕确认") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(candidates.size, key = { it }) { index ->
+                    val item = candidates[index]
+                    TextButton(onClick = { onSelect(index) }) {
+                        Text(
+                            text = "${index + 1}. ${item.originalSubtitleName} (${item.seriesTitle} ${episodeLabel(item.episode)})",
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
             }
         },
     )
@@ -522,3 +686,5 @@ private fun Bitmap.toScaledBitmap(): Bitmap {
     val targetWidth = (targetHeight * ratio).toInt().coerceAtLeast(1)
     return Bitmap.createScaledBitmap(this, targetWidth, targetHeight, true)
 }
+
+private fun episodeLabel(episode: Int?): String = if (episode == null) "电影" else "第${episode}集"

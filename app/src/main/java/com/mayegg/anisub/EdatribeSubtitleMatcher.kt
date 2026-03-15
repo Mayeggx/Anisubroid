@@ -22,7 +22,30 @@ class EdatribeSubtitleMatcher(
         private const val TAG = "EdatribeMatcher"
         private const val BASE = "https://cc.edatribe.com"
         private const val TV_SERIES_PATH = "TV series"
+        private const val MOVIE_PATH = "Movie"
     }
+
+    override suspend fun findCandidates(video: VideoItem): List<SubtitleCandidate> =
+        withContext(Dispatchers.IO) {
+            val parsed = SubtitleNameHeuristics.parseVideo(video.title)
+            val rootPath = pickRootPath(parsed)
+            val seriesDir = findBestSeriesDirectory(rootPath, parsed)
+            findEpisodeCandidates(rootPath, seriesDir.name, parsed)
+        }
+
+    override suspend fun downloadCandidate(
+        video: VideoItem,
+        candidate: SubtitleCandidate,
+    ): SubtitleDownloadResult =
+        withContext(Dispatchers.IO) {
+            val saved = saveToVideoFolder(video.folderUri, video.title, candidate.originalSubtitleName, candidate.downloadUrl)
+            SubtitleDownloadResult(
+                savedFileName = saved,
+                seriesTitle = candidate.seriesTitle,
+                episode = candidate.episode,
+                originalSubtitleName = candidate.originalSubtitleName,
+            )
+        }
 
     override suspend fun matchAndDownload(video: VideoItem): SubtitleDownloadResult =
         withContext(Dispatchers.IO) {
@@ -30,14 +53,14 @@ class EdatribeSubtitleMatcher(
             val parsed = SubtitleNameHeuristics.parseVideo(video.title)
             Log.i(TAG, "parsed title base=${parsed.baseTitle}, episode=${parsed.episode}")
 
-            val seriesDir = findBestSeriesDirectory(parsed)
+            val rootPath = pickRootPath(parsed)
+            val seriesDir = findBestSeriesDirectory(rootPath, parsed)
             Log.i(TAG, "series matched dir=${seriesDir.name}")
 
-            val subtitle = findEpisodeSubtitle(seriesDir.name, parsed.episode)
+            val subtitle = findBestEpisodeCandidate(rootPath, seriesDir.name, parsed)
             Log.i(TAG, "subtitle matched name=${subtitle.name}")
 
-            val downloadUrl = buildFileUrl(TV_SERIES_PATH, seriesDir.name, subtitle.name)
-            val saved = saveToVideoFolder(video.folderUri, video.title, subtitle.name, downloadUrl)
+            val saved = saveToVideoFolder(video.folderUri, video.title, subtitle.name, subtitle.url)
             Log.i(TAG, "saved subtitle file=$saved")
             SubtitleDownloadResult(
                 savedFileName = saved,
@@ -47,11 +70,16 @@ class EdatribeSubtitleMatcher(
             )
         }
 
-    private fun findBestSeriesDirectory(parsed: ParsedVideo): FileListItem {
-        val listUrl = buildDirectoryUrl(TV_SERIES_PATH)
+    private fun pickRootPath(parsed: ParsedVideo): String = if (parsed.episode == null) MOVIE_PATH else TV_SERIES_PATH
+
+    private fun findBestSeriesDirectory(
+        rootPath: String,
+        parsed: ParsedVideo,
+    ): FileListItem {
+        val listUrl = buildDirectoryUrl(rootPath)
         val entries = parseFileList(getText(listUrl))
             .filter { it.type == "directory" }
-        if (entries.isEmpty()) error("EdaTribe TV series 目录为空。")
+        if (entries.isEmpty()) error("EdaTribe $rootPath 目录为空。")
 
         val picked =
             entries
@@ -66,25 +94,53 @@ class EdatribeSubtitleMatcher(
         return picked.first
     }
 
-    private fun findEpisodeSubtitle(
+    private fun findBestEpisodeCandidate(
+        rootPath: String,
         seriesDirectoryName: String,
-        episode: Int,
-    ): FileListItem {
-        val listUrl = buildDirectoryUrl(TV_SERIES_PATH, seriesDirectoryName)
+        parsed: ParsedVideo,
+    ): EpisodeSubtitle {
+        val episodeMatches = findEpisodeCandidates(rootPath, seriesDirectoryName, parsed)
+        return episodeMatches
+            .maxByOrNull { scoreSubtitleFile(it.originalSubtitleName) }
+            ?.let {
+                EpisodeSubtitle(
+                    name = it.originalSubtitleName,
+                    url = it.downloadUrl,
+                )
+            }
+            ?: error("字幕筛选失败。")
+    }
+
+    private fun findEpisodeCandidates(
+        rootPath: String,
+        seriesDirectoryName: String,
+        parsed: ParsedVideo,
+    ): List<SubtitleCandidate> {
+        val listUrl = buildDirectoryUrl(rootPath, seriesDirectoryName)
         val files = parseFileList(getText(listUrl)).filter { it.type == "file" }
         if (files.isEmpty()) error("目标目录内没有可下载字幕文件。")
 
         val episodeMatches =
-            files.filter { item ->
-                val ep = SubtitleNameHeuristics.extractEpisode(item.name)
-                ep == episode
+            if (parsed.episode != null) {
+                files.filter { item ->
+                    val ep = SubtitleNameHeuristics.extractEpisode(item.name)
+                    ep == parsed.episode
+                }
+            } else {
+                files
             }
-        if (episodeMatches.isEmpty()) {
-            error("已进入目录，但没有匹配到第 $episode 集字幕。")
-        }
+        if (episodeMatches.isEmpty()) error("已进入目录，但没有可用字幕。")
 
-        return episodeMatches.maxByOrNull { scoreSubtitleFile(it.name) }
-            ?: error("第 $episode 集字幕筛选失败。")
+        return episodeMatches
+            .sortedByDescending { scoreSubtitleFile(it.name) }
+            .map {
+                SubtitleCandidate(
+                    seriesTitle = seriesDirectoryName,
+                    episode = parsed.episode,
+                    originalSubtitleName = it.name,
+                    downloadUrl = buildFileUrl(rootPath, seriesDirectoryName, it.name),
+                )
+            }
     }
 
     private fun scoreDirectory(
@@ -238,4 +294,9 @@ class EdatribeSubtitleMatcher(
 private data class FileListItem(
     val name: String,
     val type: String,
+)
+
+private data class EpisodeSubtitle(
+    val name: String,
+    val url: String,
 )
