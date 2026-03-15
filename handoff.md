@@ -1,5 +1,26 @@
 ﻿# Anisubroid Handoff
 
+## 0. 本轮追加需求（2026-03-16，来源切换 + EdaTribe）
+- 需求：
+  - 新增 cc.edatribe.com 字幕 matcher（目录型站点，先匹配 TV series 目录，再按集数匹配字幕）。
+  - 主界面右上角增加“字幕来源”下拉选择，可在不同来源间切换。
+- 已完成：
+  - 新增 EdatribeSubtitleMatcher：
+    - 从 https://cc.edatribe.com/files/TV%20series/ 获取剧集目录 JSON。
+    - 根据视频名启发式匹配最佳剧集目录。
+    - 进入剧集目录后，按集数筛选字幕文件（支持 srt/ass/ssa/vtt 优先级）。
+    - 下载落盘仍沿用 视频目录/sub/视频同名.字幕后缀 的策略。
+  - 新增来源抽象：
+    - 新增 SubtitleMatcher 接口。
+    - JimakuSubtitleMatcher / EdatribeSubtitleMatcher 统一实现该接口。
+  - 主界面改造：
+    - 顶栏右上角新增来源下拉（Jimaku / EdaTribe）。
+    - ViewModel 根据来源动态分发 matcher，并更新状态提示文案。
+  - 复用解析能力：
+    - 将 ParsedVideo 与 SubtitleNameHeuristics 调整为同包可复用。
+- 本轮验证：
+  - scripts/build-debug.ps1 编译通过。
+  - scripts/start-adb-debug.ps1 执行通过（adb daemon 启动成功，应用 Activity 被带到前台）。
 ## 0. 本轮追加需求（2026-03-16）
 - 需求：字幕下载到“当前视频目录/sub/”下，字幕名与视频同名；后缀允许 srt / ass（沿用实际下载字幕后缀）。
 - 已完成：
@@ -65,3 +86,9 @@
 2. 增加“候选列表确认”模式（匹配结果给用户二次确认）。
 3. 为文件名解析和评分器补充单元测试样例集。
 
+
+## 8. 2026-03-16：.srt.txt 修复 + 匹配日志
+- 修复：为字幕创建文件时按后缀使用更准确的 MIME（application/x-subrip、text/x-ssa、text/vtt），避免高版本 Android 将 .srt 自动转成 .srt.txt。
+- 新增：右上角“日志”入口，展示每次匹配记录。
+- 日志字段：来源、匹配剧集名、集数、原文件名、改名后文件名、时间戳。
+- 验证：scripts/build-debug.ps1 通过；scripts/start-adb-debug.ps1 已执行。

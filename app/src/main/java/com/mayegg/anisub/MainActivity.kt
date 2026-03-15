@@ -28,6 +28,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -37,7 +40,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -60,6 +66,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -81,6 +89,7 @@ class MainActivity : ComponentActivity() {
             AppScreen(
                 state = state,
                 onPickFolder = { folderLauncher.launch(null) },
+                onSelectSubtitleSource = vm::setSubtitleSource,
                 onMatchSubtitle = vm::matchSubtitle,
             )
         }
@@ -109,9 +118,27 @@ data class VideoItem(
 data class MainUiState(
     val loading: Boolean = false,
     val folderLabel: String = "未选择文件夹",
+    val subtitleSource: SubtitleSource = SubtitleSource.Jimaku,
     val videos: List<VideoItem> = emptyList(),
+    val logs: List<MatchLogItem> = emptyList(),
     val message: String = "请选择视频文件夹。",
 )
+
+data class MatchLogItem(
+    val timestamp: String,
+    val source: SubtitleSource,
+    val seriesTitle: String,
+    val episode: Int,
+    val originalFileName: String,
+    val renamedFileName: String,
+)
+
+enum class SubtitleSource(
+    val label: String,
+) {
+    Jimaku("Jimaku"),
+    Edatribe("EdaTribe"),
+}
 
 class MainViewModel(
     application: android.app.Application,
@@ -121,7 +148,17 @@ class MainViewModel(
     }
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
-    private val matcher = JimakuSubtitleMatcher(application)
+    private val jimakuMatcher = JimakuSubtitleMatcher(application)
+    private val edatribeMatcher = EdatribeSubtitleMatcher(application)
+
+    fun setSubtitleSource(source: SubtitleSource) {
+        _uiState.update {
+            it.copy(
+                subtitleSource = source,
+                message = "当前字幕来源：${source.label}",
+            )
+        }
+    }
 
     fun loadFolder(activity: ComponentActivity, treeUri: Uri) {
         _uiState.update {
@@ -158,6 +195,7 @@ class MainViewModel(
 
     fun matchSubtitle(videoId: String) {
         val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
+        val source = _uiState.value.subtitleSource
         _uiState.update { state ->
             state.copy(
                 videos =
@@ -168,15 +206,24 @@ class MainViewModel(
                             item
                         }
                     },
-                message = "正在从 Jimaku 匹配：${target.title}",
+                message = "正在从 ${source.label} 匹配：${target.title}",
             )
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            val matcher: SubtitleMatcher =
+                when (source) {
+                    SubtitleSource.Jimaku -> jimakuMatcher
+                    SubtitleSource.Edatribe -> edatribeMatcher
+                }
             val output =
                 runCatching { matcher.matchAndDownload(target) }
                     .fold(
                         onSuccess = { result ->
+                            addLog(
+                                source = source,
+                                result = result,
+                            )
                             "匹配成功：${result.savedFileName}"
                         },
                         onFailure = { error ->
@@ -195,6 +242,24 @@ class MainViewModel(
                 )
             }
         }
+    }
+
+    private fun addLog(
+        source: SubtitleSource,
+        result: SubtitleDownloadResult,
+    ) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val renamed = result.savedFileName.substringAfterLast('/')
+        val log =
+            MatchLogItem(
+                timestamp = timestamp,
+                source = source,
+                seriesTitle = result.seriesTitle,
+                episode = result.episode,
+                originalFileName = result.originalSubtitleName,
+                renamedFileName = renamed,
+            )
+        _uiState.update { it.copy(logs = listOf(log) + it.logs) }
     }
 
     private fun resolveFolderLabel(activity: ComponentActivity, uri: Uri): String =
@@ -238,8 +303,10 @@ class MainViewModel(
 private fun AppScreen(
     state: MainUiState,
     onPickFolder: () -> Unit,
+    onSelectSubtitleSource: (SubtitleSource) -> Unit,
     onMatchSubtitle: (String) -> Unit,
 ) {
+    var logVisible by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -255,6 +322,13 @@ private fun AppScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = { logVisible = true }) {
+                        Text("日志")
+                    }
+                    SubtitleSourceDropdown(
+                        selected = state.subtitleSource,
+                        onSelect = onSelectSubtitleSource,
+                    )
                     TextButton(onClick = onPickFolder) {
                         Text("打开文件夹")
                     }
@@ -296,6 +370,73 @@ private fun AppScreen(
             }
         }
     }
+
+    if (logVisible) {
+        LogDialog(
+            logs = state.logs,
+            onDismiss = { logVisible = false },
+        )
+    }
+}
+
+@Composable
+private fun SubtitleSourceDropdown(
+    selected: SubtitleSource,
+    onSelect: (SubtitleSource) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Text("来源: ${selected.label}")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            SubtitleSource.entries.forEach { source ->
+                DropdownMenuItem(
+                    text = { Text(source.label) },
+                    onClick = {
+                        expanded = false
+                        onSelect(source)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogDialog(
+    logs: List<MatchLogItem>,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("匹配日志") },
+        text = {
+            if (logs.isEmpty()) {
+                Text("暂无日志。")
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(logs, key = { "${it.timestamp}-${it.renamedFileName}" }) { item ->
+                        Text(
+                            text = "[${item.timestamp}] ${item.source.label} | ${item.seriesTitle} | 第${item.episode}集 | 原文件: ${item.originalFileName} | 改名: ${item.renamedFileName}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
 }
 
 @Composable

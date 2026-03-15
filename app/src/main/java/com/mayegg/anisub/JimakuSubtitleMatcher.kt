@@ -18,16 +18,19 @@ import kotlin.math.max
 
 data class SubtitleDownloadResult(
     val savedFileName: String,
+    val seriesTitle: String,
+    val episode: Int,
+    val originalSubtitleName: String,
 )
 
 class JimakuSubtitleMatcher(
     private val context: Context,
-) {
+) : SubtitleMatcher {
     companion object {
         private const val TAG = "JimakuMatcher"
     }
 
-    suspend fun matchAndDownload(video: VideoItem): SubtitleDownloadResult =
+    override suspend fun matchAndDownload(video: VideoItem): SubtitleDownloadResult =
         withContext(Dispatchers.IO) {
             Log.i(TAG, "matchAndDownload start title=${video.title}")
             val parsed = SubtitleNameHeuristics.parseVideo(video.title)
@@ -38,7 +41,12 @@ class JimakuSubtitleMatcher(
             Log.i(TAG, "download matched name=${download.name}, url=${download.url}")
             val saved = saveToVideoFolder(video.folderUri, video.title, download)
             Log.i(TAG, "saved subtitle file=$saved")
-            SubtitleDownloadResult(savedFileName = saved)
+            SubtitleDownloadResult(
+                savedFileName = saved,
+                seriesTitle = entry.title,
+                episode = parsed.episode,
+                originalSubtitleName = download.name,
+            )
         }
 
     private fun findBestEntry(parsed: ParsedVideo): EntryItem {
@@ -254,7 +262,10 @@ class JimakuSubtitleMatcher(
     private fun guessMimeType(name: String): String {
         val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
         return when (ext) {
-            "srt", "ass", "ssa", "vtt", "sup", "txt" -> "text/plain"
+            "srt" -> "application/x-subrip"
+            "ass", "ssa" -> "text/x-ssa"
+            "vtt" -> "text/vtt"
+            "sup", "txt" -> "application/octet-stream"
             "zip" -> "application/zip"
             "7z" -> "application/x-7z-compressed"
             "rar" -> "application/vnd.rar"
@@ -273,14 +284,14 @@ private data class DownloadItem(
     val name: String,
 )
 
-private data class ParsedVideo(
+data class ParsedVideo(
     val baseTitle: String,
     val season: Int?,
     val episode: Int,
     val queryTitles: List<String>,
 )
 
-private object SubtitleNameHeuristics {
+object SubtitleNameHeuristics {
     private const val TAG = "SubtitleHeuristics"
 
     private val seasonRegexes =
