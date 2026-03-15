@@ -1,0 +1,9 @@
+﻿<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="launcher_background">#FFF3EFE6</color>
+    <color name="launcher_card">#FFFFFFFF</color>
+    <color name="launcher_photo">#FFD8E7FF</color>
+    <color name="launcher_accent">#FF2D6CDF</color>
+    <color name="launcher_ink">#FF102A43</color>
+</resources>
