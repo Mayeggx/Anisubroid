@@ -112,6 +112,9 @@ class MainActivity : ComponentActivity() {
                 onMatchSubtitle = vm::matchSubtitle,
                 onConfirmCandidate = vm::confirmCandidate,
                 onDismissCandidates = vm::dismissCandidates,
+                onOpenVideoDownload = {
+                    startActivity(Intent(this@MainActivity, VideoDownloadActivity::class.java))
+                },
             )
         }
     }
@@ -668,6 +671,7 @@ private fun AppScreen(
     onMatchSubtitle: (String) -> Unit,
     onConfirmCandidate: (Int) -> Unit,
     onDismissCandidates: () -> Unit,
+    onOpenVideoDownload: () -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
     var folderEditVisible by remember { mutableStateOf(false) }
@@ -684,6 +688,9 @@ private fun AppScreen(
                     )
                 },
                 actions = {
+                    TextButton(onClick = onOpenVideoDownload) {
+                        Text("视频下载")
+                    }
                     TextButton(onClick = { logVisible = true }) {
                         Text("日志")
                     }
