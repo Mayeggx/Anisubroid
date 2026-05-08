@@ -3,6 +3,7 @@
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -16,11 +17,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -34,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +55,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,6 +67,11 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    private enum class FolderPickMode {
+        OpenAndLoad,
+        AddOnly,
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -67,17 +79,34 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: MainViewModel = viewModel()
             val state by vm.uiState.collectAsStateWithLifecycle()
+            var folderPickMode by remember { mutableStateOf(FolderPickMode.OpenAndLoad) }
 
             val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
                     persistReadWritePermission(it)
-                    vm.loadFolder(this, it)
+                    when (folderPickMode) {
+                        FolderPickMode.OpenAndLoad -> vm.loadFolder(this, it)
+                        FolderPickMode.AddOnly -> vm.addFolder(this, it)
+                    }
                 }
+            }
+
+            LaunchedEffect(Unit) {
+                vm.restoreLastOpenedFolder(this@MainActivity)
             }
 
             AppScreen(
                 state = state,
-                onPickFolder = { folderLauncher.launch(null) },
+                onPickFolder = {
+                    folderPickMode = FolderPickMode.OpenAndLoad
+                    folderLauncher.launch(null)
+                },
+                onAddFolder = {
+                    folderPickMode = FolderPickMode.AddOnly
+                    folderLauncher.launch(null)
+                },
+                onSelectSavedFolder = { vm.loadFolder(this, it) },
+                onRemoveSavedFolder = vm::removeFolder,
                 onSelectSubtitleSource = vm::setSubtitleSource,
                 onSelectMatchMode = vm::setMatchMode,
                 onMatchSubtitle = vm::matchSubtitle,
@@ -109,7 +138,13 @@ data class VideoItem(
 
 data class MainUiState(
     val loading: Boolean = false,
+    val batchRunning: Boolean = false,
+    val batchViewerVisible: Boolean = false,
+    val batchTotal: Int = 0,
+    val batchDone: Int = 0,
+    val batchLogs: List<String> = emptyList(),
     val folderLabel: String = "未选择文件夹",
+    val folderHistory: List<SavedFolder> = emptyList(),
     val subtitleSource: SubtitleSource = SubtitleSource.Jimaku,
     val matchMode: MatchMode = MatchMode.Candidate,
     val videos: List<VideoItem> = emptyList(),
@@ -117,6 +152,11 @@ data class MainUiState(
     val pendingCandidates: List<SubtitleCandidate> = emptyList(),
     val pendingVideoId: String? = null,
     val message: String = "请选择视频文件夹。",
+)
+
+data class SavedFolder(
+    val uri: Uri,
+    val label: String,
 )
 
 data class MatchLogItem(
@@ -147,11 +187,22 @@ class MainViewModel(
 ) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "AnisubroidMain"
+        private const val TAG_BATCH = "AnisubroidBatch"
+        private const val PREF_NAME = "anisubroid_prefs"
+        private const val KEY_FOLDER_LIST = "folder_list"
+        private const val KEY_LAST_FOLDER = "last_folder"
+        private const val LIST_SEPARATOR = "\n"
     }
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
     private val jimakuMatcher = JimakuSubtitleMatcher(application)
     private val edatribeMatcher = EdatribeSubtitleMatcher(application)
+    private val prefs = application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    private var batchJob: Job? = null
+
+    init {
+        _uiState.update { it.copy(folderHistory = readFolderHistory()) }
+    }
 
     fun setSubtitleSource(source: SubtitleSource) {
         _uiState.update {
@@ -171,17 +222,18 @@ class MainViewModel(
         }
     }
 
-    fun loadFolder(activity: ComponentActivity, treeUri: Uri) {
+    fun loadFolder(context: Context, treeUri: Uri) {
+        addFolderInternal(context, treeUri)
         _uiState.update {
             it.copy(
                 loading = true,
-                folderLabel = resolveFolderLabel(activity, treeUri),
+                folderLabel = resolveFolderLabel(context, treeUri),
                 message = "正在扫描视频...",
             )
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            val videoFiles = collectVideoFiles(activity, treeUri)
+            val videoFiles = collectVideoFiles(context, treeUri)
             val videos =
                 videoFiles
                     .sortedBy { it.file.name.orEmpty().lowercase(Locale.ROOT) }
@@ -215,7 +267,40 @@ class MainViewModel(
         }
     }
 
+    fun restoreLastOpenedFolder(context: Context) {
+        val raw = prefs.getString(KEY_LAST_FOLDER, null).orEmpty()
+        if (raw.isBlank()) return
+        val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return
+        loadFolder(context, uri)
+    }
+
+    fun addFolder(context: Context, treeUri: Uri) {
+        addFolderInternal(context, treeUri)
+        _uiState.update {
+            it.copy(message = "已添加文件夹：${resolveFolderLabel(context, treeUri)}")
+        }
+    }
+
+    fun removeFolder(folderUri: Uri) {
+        val updated = readFolderHistory().filterNot { it.uri.toString() == folderUri.toString() }
+        saveFolderHistory(updated)
+        val current = _uiState.value
+        val shouldResetCurrent = current.videos.isNotEmpty() && current.videos.first().folderUri.toString() == folderUri.toString()
+        _uiState.update {
+            it.copy(
+                folderHistory = updated,
+                folderLabel = if (shouldResetCurrent) "未选择文件夹" else it.folderLabel,
+                videos = if (shouldResetCurrent) emptyList() else it.videos,
+                message = if (shouldResetCurrent) "已删除当前文件夹，请重新选择。" else "已删除文件夹。",
+            )
+        }
+        if (prefs.getString(KEY_LAST_FOLDER, null) == folderUri.toString()) {
+            prefs.edit().remove(KEY_LAST_FOLDER).apply()
+        }
+    }
+
     fun matchSubtitle(videoId: String) {
+        if (_uiState.value.batchRunning) return
         val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
         val stateSnapshot = _uiState.value
         val source = stateSnapshot.subtitleSource
@@ -235,39 +320,7 @@ class MainViewModel(
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            val matcher: SubtitleMatcher =
-                when (source) {
-                    SubtitleSource.Jimaku -> jimakuMatcher
-                    SubtitleSource.Edatribe -> edatribeMatcher
-                }
-            val output = runCatching {
-                if (mode == MatchMode.Auto) {
-                    val result = matcher.matchAndDownload(target)
-                    addLog(source = source, result = result)
-                    "匹配成功：${result.savedFileName}"
-                } else {
-                    val candidates = matcher.findCandidates(target).take(8)
-                    if (candidates.isEmpty()) {
-                        "匹配失败：未找到候选字幕。"
-                    } else if (candidates.size == 1) {
-                        val result = matcher.downloadCandidate(target, candidates.first())
-                        addLog(source = source, result = result)
-                        "匹配成功：${result.savedFileName}"
-                    } else {
-                        _uiState.update { state ->
-                            state.copy(
-                                pendingCandidates = candidates,
-                                pendingVideoId = videoId,
-                                message = "找到 ${candidates.size} 个候选字幕，请确认。",
-                            )
-                        }
-                        "找到 ${candidates.size} 个候选字幕，请确认。"
-                    }
-                }
-            }.getOrElse { error ->
-                Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
-                "匹配失败：${error.message ?: "未知错误"}"
-            }
+            val output = runMatchByCurrentMode(videoId = videoId, source = source, mode = mode)
 
             _uiState.update { state ->
                 state.copy(
@@ -279,6 +332,152 @@ class MainViewModel(
                 )
             }
         }
+    }
+
+    fun batchMatchAuto(context: Context) {
+        val snapshot = _uiState.value
+        if (snapshot.batchRunning) return
+        if (snapshot.loading) return
+        val targets = snapshot.videos.filter { !hasExistingSubtitle(context, it.folderUri, it.title) }
+        if (targets.isEmpty()) {
+            _uiState.update { it.copy(message = "无需批量处理：当前视频都已有字幕。") }
+            Log.i(TAG_BATCH, "[BATCH] skip: no videos without subtitle")
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                batchRunning = true,
+                batchViewerVisible = true,
+                matchMode = MatchMode.Auto,
+                batchTotal = targets.size,
+                batchDone = 0,
+                batchLogs = listOf("批量开始：共 ${targets.size} 个待处理视频，来源=${snapshot.subtitleSource.label}"),
+                message = "批量自动匹配开始，共 ${targets.size} 个待处理视频。已切换到自动模式。",
+            )
+        }
+        Log.i(TAG_BATCH, "[BATCH] start count=${targets.size}, source=${snapshot.subtitleSource.label}")
+
+        batchJob = viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val source = _uiState.value.subtitleSource
+                var success = 0
+                var failed = 0
+                var skipped = 0
+                targets.forEachIndexed { index, video ->
+                    val seq = index + 1
+                    if (hasExistingSubtitle(context, video.folderUri, video.title)) {
+                        skipped += 1
+                        Log.i(TAG_BATCH, "[BATCH] [$seq/${targets.size}] skip(existing): ${video.title}")
+                        appendBatchLog("[$seq/${targets.size}] 跳过（已存在字幕）：${video.title}")
+                        _uiState.update { state ->
+                            state.copy(
+                                videos = state.videos.map { item ->
+                                    if (item.id == video.id) item.copy(subtitleStatus = "已存在对应字幕", matching = false) else item
+                                },
+                                message = "批量跳过（已存在字幕）：${video.title}",
+                            )
+                        }
+                    } else {
+                        Log.i(TAG_BATCH, "[BATCH] [$seq/${targets.size}] matching(auto): ${video.title}")
+                        appendBatchLog("[$seq/${targets.size}] 开始：${video.title}")
+                        _uiState.update { state ->
+                            state.copy(
+                                videos = state.videos.map { item ->
+                                    if (item.id == video.id) item.copy(subtitleStatus = "批量匹配中...", matching = true) else item
+                                },
+                                message = "批量处理中（$seq/${targets.size}）：${video.title}",
+                            )
+                        }
+                        val output = runMatchByCurrentMode(videoId = video.id, source = source, mode = MatchMode.Auto)
+                        if (output.startsWith("匹配成功：")) {
+                            success += 1
+                            appendBatchLog("[$seq/${targets.size}] 成功：${video.title}")
+                        } else {
+                            failed += 1
+                            appendBatchLog("[$seq/${targets.size}] 失败：${video.title} -> $output")
+                        }
+                    }
+                    _uiState.update { it.copy(batchDone = seq) }
+                    if (seq < targets.size) {
+                        delay(1000)
+                    }
+                }
+
+                val summary = "批量完成：成功 $success，失败 $failed，跳过 $skipped。"
+                Log.i(TAG_BATCH, "[BATCH] done success=$success failed=$failed skipped=$skipped")
+                appendBatchLog(summary)
+                _uiState.update { it.copy(batchRunning = false, message = summary) }
+            }.onFailure { error ->
+                Log.e(TAG_BATCH, "[BATCH] unexpected crash", error)
+                appendBatchLog("批量异常终止：${error.message ?: "未知错误"}")
+                _uiState.update {
+                    it.copy(
+                        batchRunning = false,
+                        message = "批量异常终止：${error.message ?: "未知错误"}",
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun runMatchByCurrentMode(
+        videoId: String,
+        source: SubtitleSource,
+        mode: MatchMode,
+    ): String {
+        val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return "匹配失败：目标视频不存在。"
+        val matcher: SubtitleMatcher =
+            when (source) {
+                SubtitleSource.Jimaku -> jimakuMatcher
+                SubtitleSource.Edatribe -> edatribeMatcher
+            }
+        return runCatching {
+            if (mode == MatchMode.Auto) {
+                val result = matcher.matchAndDownload(target)
+                addLog(source = source, result = result)
+                "匹配成功：${result.savedFileName}"
+            } else {
+                val candidates = matcher.findCandidates(target).take(8)
+                if (candidates.isEmpty()) {
+                    "匹配失败：未找到候选字幕。"
+                } else if (candidates.size == 1) {
+                    val result = matcher.downloadCandidate(target, candidates.first())
+                    addLog(source = source, result = result)
+                    "匹配成功：${result.savedFileName}"
+                } else {
+                    _uiState.update { state ->
+                        state.copy(
+                            pendingCandidates = candidates,
+                            pendingVideoId = videoId,
+                            message = "找到 ${candidates.size} 个候选字幕，请确认。",
+                        )
+                    }
+                    "找到 ${candidates.size} 个候选字幕，请确认。"
+                }
+            }
+        }.getOrElse { error ->
+            Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
+            "匹配失败：${error.message ?: "未知错误"}"
+        }
+    }
+
+    fun stopBatch() {
+        if (!_uiState.value.batchRunning) {
+            _uiState.update { it.copy(batchViewerVisible = false) }
+            return
+        }
+        batchJob?.cancel()
+        batchJob = null
+        appendBatchLog("批量已手动停止。")
+        _uiState.update {
+            it.copy(
+                batchRunning = false,
+                batchViewerVisible = false,
+                message = "批量已停止。",
+            )
+        }
+        Log.i(TAG_BATCH, "[BATCH] cancelled by user")
     }
 
     fun confirmCandidate(index: Int) {
@@ -359,14 +558,41 @@ class MainViewModel(
         _uiState.update { it.copy(logs = listOf(log) + it.logs) }
     }
 
-    private fun resolveFolderLabel(activity: ComponentActivity, uri: Uri): String =
-        DocumentFile.fromTreeUri(activity, uri)?.name ?: uri.lastPathSegment ?: uri.toString()
+    private fun addFolderInternal(context: Context, treeUri: Uri) {
+        val label = resolveFolderLabel(context, treeUri)
+        val old = readFolderHistory().filterNot { it.uri.toString() == treeUri.toString() }
+        val updated = listOf(SavedFolder(treeUri, label)) + old
+        saveFolderHistory(updated)
+        prefs.edit().putString(KEY_LAST_FOLDER, treeUri.toString()).apply()
+        _uiState.update { it.copy(folderHistory = updated) }
+    }
 
-    private fun collectVideoFiles(activity: ComponentActivity, treeUri: Uri): List<ScannedVideo> {
-        val root = DocumentFile.fromTreeUri(activity, treeUri) ?: return emptyList()
+    private fun resolveFolderLabel(context: Context, uri: Uri): String =
+        DocumentFile.fromTreeUri(context, uri)?.name ?: uri.lastPathSegment ?: uri.toString()
+
+    private fun collectVideoFiles(context: Context, treeUri: Uri): List<ScannedVideo> {
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
         return root.listFiles()
             .filter { it.isFile && isVideo(it) }
             .map { ScannedVideo(file = it, parent = root) }
+    }
+
+    private fun readFolderHistory(): List<SavedFolder> {
+        val rows = prefs.getString(KEY_FOLDER_LIST, "").orEmpty()
+            .split(LIST_SEPARATOR)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        return rows.mapNotNull { row ->
+            val parts = row.split("|", limit = 2)
+            if (parts.size != 2) return@mapNotNull null
+            val uri = runCatching { Uri.parse(parts[0]) }.getOrNull() ?: return@mapNotNull null
+            SavedFolder(uri = uri, label = parts[1])
+        }
+    }
+
+    private fun saveFolderHistory(items: List<SavedFolder>) {
+        val payload = items.joinToString(LIST_SEPARATOR) { "${it.uri}|${it.label}" }
+        prefs.edit().putString(KEY_FOLDER_LIST, payload).apply()
     }
 
     private data class ScannedVideo(
@@ -410,6 +636,19 @@ class MainViewModel(
             lower.endsWith(".vtt")
     }
 
+    private fun hasExistingSubtitle(
+        context: Context,
+        folderUri: Uri,
+        videoTitle: String,
+    ): Boolean = runCatching { findMatchingSubtitleUri(context, folderUri, videoTitle) != null }.getOrDefault(false)
+
+    private fun appendBatchLog(line: String) {
+        _uiState.update {
+            val next = (it.batchLogs + line).takeLast(200)
+            it.copy(batchLogs = next)
+        }
+    }
+
     private fun baseName(name: String): String {
         val dot = name.lastIndexOf('.')
         return if (dot <= 0) name else name.substring(0, dot)
@@ -421,6 +660,9 @@ class MainViewModel(
 private fun AppScreen(
     state: MainUiState,
     onPickFolder: () -> Unit,
+    onAddFolder: () -> Unit,
+    onSelectSavedFolder: (Uri) -> Unit,
+    onRemoveSavedFolder: (Uri) -> Unit,
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
     onMatchSubtitle: (String) -> Unit,
@@ -428,6 +670,7 @@ private fun AppScreen(
     onDismissCandidates: () -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
+    var folderEditVisible by remember { mutableStateOf(false) }
     val context = LocalContext.current
     Scaffold(
         topBar = {
@@ -452,9 +695,11 @@ private fun AppScreen(
                         selected = state.subtitleSource,
                         onSelect = onSelectSubtitleSource,
                     )
-                    TextButton(onClick = onPickFolder) {
-                        Text("打开")
-                    }
+                    FolderDropdown(
+                        folders = state.folderHistory,
+                        onSelectSavedFolder = onSelectSavedFolder,
+                        onEditFolders = { folderEditVisible = true },
+                    )
                 },
             )
         },
@@ -505,12 +750,57 @@ private fun AppScreen(
         )
     }
 
+    if (folderEditVisible) {
+        FolderEditDialog(
+            folders = state.folderHistory,
+            onDismiss = { folderEditVisible = false },
+            onAddFolder = onAddFolder,
+            onRemoveFolder = onRemoveSavedFolder,
+        )
+    }
+
     if (state.pendingCandidates.isNotEmpty()) {
         CandidateDialog(
             candidates = state.pendingCandidates,
             onDismiss = onDismissCandidates,
             onSelect = onConfirmCandidate,
         )
+    }
+
+}
+
+@Composable
+private fun FolderDropdown(
+    folders: List<SavedFolder>,
+    onSelectSavedFolder: (Uri) -> Unit,
+    onEditFolders: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Text("文件夹")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            folders.forEach { folder ->
+                DropdownMenuItem(
+                    text = { Text(folder.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    onClick = {
+                        expanded = false
+                        onSelectSavedFolder(folder.uri)
+                    },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("编辑") },
+                onClick = {
+                    expanded = false
+                    onEditFolders()
+                },
+            )
+        }
     }
 }
 
@@ -539,6 +829,57 @@ private fun SubtitleSourceDropdown(
             }
         }
     }
+}
+
+@Composable
+private fun FolderEditDialog(
+    folders: List<SavedFolder>,
+    onDismiss: () -> Unit,
+    onAddFolder: () -> Unit,
+    onRemoveFolder: (Uri) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑文件夹") },
+        text = {
+            if (folders.isEmpty()) {
+                Text("暂无已添加文件夹。")
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(folders, key = { it.uri.toString() }) { folder ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = folder.label,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            TextButton(onClick = { onRemoveFolder(folder.uri) }) {
+                                Text("删除")
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onAddFolder) {
+                    Text("添加")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("关闭")
+                }
+            }
+        },
+    )
 }
 
 @Composable
