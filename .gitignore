@@ -34,3 +34,6 @@ replay_pid*
 .env.*
 
 plan.md
+planx.md
+release/
+java_pid*.hprof
