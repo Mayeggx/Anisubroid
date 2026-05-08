@@ -393,7 +393,7 @@ object SubtitleNameHeuristics {
             ?.let { return it }
 
         val generic =
-            compileRegex("extractEpisode:generic", """(?:^|[\s._-])0*([0-9]{1,3})(?=$|[\s._\-\[\(])""")
+            compileRegex("extractEpisode:generic", """(?:^|[\s._\-\[\(])0*([0-9]{1,3})(?=$|[\s._\-\]\)\[\(])""")
                 .findAll(stem)
                 .mapNotNull { match ->
                     val value = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return@mapNotNull null
@@ -428,7 +428,7 @@ object SubtitleNameHeuristics {
         t = t.replace(compileRegex("cleanBaseTitle:ordinalSeason", """\b\d+(st|nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE), " ")
         t = t.replace(compileRegex("cleanBaseTitle:episode", """\b(?:E|EP|Episode)\s*\d+\b""", RegexOption.IGNORE_CASE), " ")
         t = t.replace(compileRegex("cleanBaseTitle:cnjpEpisode", """第\s*\d+\s*[话話集]"""), " ")
-        t = t.replace(compileRegex("cleanBaseTitle:genericNumber", """(?:^|[\s._-])0*\d{1,3}(?=$|[\s._\-\[\(])"""), " ")
+        t = t.replace(compileRegex("cleanBaseTitle:genericNumber", """(?:^|[\s._\-\[\(])0*\d{1,3}(?=$|[\s._\-\]\)\[\(])"""), " ")
         t = t.replace(
             compileRegex("cleanBaseTitle:codec", """\b(HEVC|x265|x264|10bit|8bit|AAC|FLAC|WEBRip|BDRip|BluRay|WEB|TV|AT-X|AMZN|NF)\b""", RegexOption.IGNORE_CASE),
             " ",

@@ -1,5 +1,18 @@
 ﻿# Anisubroid Handoff
 
+## 0. 本轮追加需求（2026-05-09，Jimaku badcase：方括号集数）
+- 需求：
+  - 修复 badcase：视频文件 `[ASW] Awajima Hyakkei - 02 [1080p HEVC][A19228D7].mkv` 无法匹配 `https://jimaku.cc/entry/11862` 下的 `[KitaujiSub] Awajima Hyakkei [02][WebRip][HEVC_AAC][JPN].ass`。
+- 根因：
+  - `SubtitleNameHeuristics.extractEpisode` 的通用集数正则不支持 `[02]` 这类“被 `[]` 包裹”的集数格式，导致进入正确条目后无法按集数筛选到候选字幕。
+- 已完成：
+  - 更新 `extractEpisode:generic` 正则，支持 `[]`/`()` 包裹的集数边界。
+  - 同步更新 `cleanBaseTitle:genericNumber` 正则，避免同类格式在清洗时漏处理。
+- 本轮验证：
+  - `scripts/build-debug.ps1` 执行通过（exit code 0）。
+  - `scripts/start-adb-debug.ps1` 执行完成；adb daemon 启动成功。
+  - 设备安装阶段仍为 `INSTALL_FAILED_ABORTED: User rejected permissions`（设备侧授权问题，非代码错误）。
+
 ## 0. 本轮追加需求（2026-05-09，视频下载界面）
 - 需求：
   - 新增“视频下载”界面。
