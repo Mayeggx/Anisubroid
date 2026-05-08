@@ -15,12 +15,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -36,7 +39,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -678,36 +680,17 @@ private fun AppScreen(
     val context = LocalContext.current
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = state.folderLabel,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                actions = {
-                    TextButton(onClick = onOpenVideoDownload) {
-                        Text("视频下载")
-                    }
-                    TextButton(onClick = { logVisible = true }) {
-                        Text("日志")
-                    }
-                    MatchModeDropdown(
-                        selected = state.matchMode,
-                        onSelect = onSelectMatchMode,
-                    )
-                    SubtitleSourceDropdown(
-                        selected = state.subtitleSource,
-                        onSelect = onSelectSubtitleSource,
-                    )
-                    FolderDropdown(
-                        folders = state.folderHistory,
-                        onSelectSavedFolder = onSelectSavedFolder,
-                        onEditFolders = { folderEditVisible = true },
-                    )
-                },
+            AppTopBar(
+                folderLabel = state.folderLabel,
+                matchMode = state.matchMode,
+                subtitleSource = state.subtitleSource,
+                folders = state.folderHistory,
+                onOpenVideoDownload = onOpenVideoDownload,
+                onOpenLog = { logVisible = true },
+                onSelectMatchMode = onSelectMatchMode,
+                onSelectSubtitleSource = onSelectSubtitleSource,
+                onSelectSavedFolder = onSelectSavedFolder,
+                onEditFolders = { folderEditVisible = true },
             )
         },
     ) { innerPadding ->
@@ -776,6 +759,69 @@ private fun AppScreen(
 
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppTopBar(
+    folderLabel: String,
+    matchMode: MatchMode,
+    subtitleSource: SubtitleSource,
+    folders: List<SavedFolder>,
+    onOpenVideoDownload: () -> Unit,
+    onOpenLog: () -> Unit,
+    onSelectMatchMode: (MatchMode) -> Unit,
+    onSelectSubtitleSource: (SubtitleSource) -> Unit,
+    onSelectSavedFolder: (Uri) -> Unit,
+    onEditFolders: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = folderLabel,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            TextButton(
+                onClick = onOpenVideoDownload,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.heightIn(min = 32.dp),
+            ) {
+                Text("种子")
+            }
+            TextButton(
+                onClick = onOpenLog,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.heightIn(min = 32.dp),
+            ) {
+                Text("日志")
+            }
+            MatchModeDropdown(
+                selected = matchMode,
+                onSelect = onSelectMatchMode,
+            )
+            SubtitleSourceDropdown(
+                selected = subtitleSource,
+                onSelect = onSelectSubtitleSource,
+            )
+            FolderDropdown(
+                folders = folders,
+                onSelectSavedFolder = onSelectSavedFolder,
+                onEditFolders = onEditFolders,
+            )
+        }
+    }
+}
+
 @Composable
 private fun FolderDropdown(
     folders: List<SavedFolder>,
@@ -784,8 +830,12 @@ private fun FolderDropdown(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { expanded = true }) {
-            Text("文件夹")
+        TextButton(
+            onClick = { expanded = true },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.heightIn(min = 32.dp),
+        ) {
+            Text("文件")
         }
         DropdownMenu(
             expanded = expanded,
@@ -818,8 +868,12 @@ private fun SubtitleSourceDropdown(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { expanded = true }) {
-            Text("来源: ${selected.label}")
+        TextButton(
+            onClick = { expanded = true },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.heightIn(min = 32.dp),
+        ) {
+            Text("来源")
         }
         DropdownMenu(
             expanded = expanded,
@@ -896,8 +950,12 @@ private fun MatchModeDropdown(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { expanded = true }) {
-            Text("模式: ${selected.label}")
+        TextButton(
+            onClick = { expanded = true },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.heightIn(min = 32.dp),
+        ) {
+            Text("模式")
         }
         DropdownMenu(
             expanded = expanded,
