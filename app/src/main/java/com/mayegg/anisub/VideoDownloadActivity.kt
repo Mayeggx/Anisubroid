@@ -85,6 +85,27 @@ class VideoDownloadActivity : ComponentActivity() {
     }
 }
 
+@Composable
+fun VideoDownloadPage() {
+    val vm: VideoDownloadViewModel = viewModel()
+    val state by vm.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    VideoDownloadScreen(
+        state = state,
+        onBack = vm::backToList,
+        onAddSubscription = vm::addSubscription,
+        onRemoveSubscription = vm::removeSubscription,
+        onOpenSubscription = vm::openSubscription,
+        onBackToList = vm::backToList,
+        onRefreshEntries = vm::refreshActiveSubscription,
+        onDownloadTorrent = vm::downloadTorrent,
+        onOpenTorrent = { path ->
+            val message = openTorrentFile(context, path)
+            if (message != null) vm.setMessage(message)
+        },
+    )
+}
+
 data class VideoSubscriptionItem(
     val id: String,
     val label: String,

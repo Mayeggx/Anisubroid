@@ -19,11 +19,15 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -44,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,6 +72,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.mayegg.anisub.wordnote.WordNotePage
 
 class MainActivity : ComponentActivity() {
     private enum class FolderPickMode {
@@ -82,6 +88,8 @@ class MainActivity : ComponentActivity() {
             val vm: MainViewModel = viewModel()
             val state by vm.uiState.collectAsStateWithLifecycle()
             var folderPickMode by remember { mutableStateOf(FolderPickMode.OpenAndLoad) }
+            var currentPage by rememberSaveable { mutableStateOf(AppPage.SubtitleMatch) }
+            var sidebarVisible by rememberSaveable { mutableStateOf(false) }
 
             val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
@@ -97,27 +105,54 @@ class MainActivity : ComponentActivity() {
                 vm.restoreLastOpenedFolder(this@MainActivity)
             }
 
-            AppScreen(
-                state = state,
-                onPickFolder = {
-                    folderPickMode = FolderPickMode.OpenAndLoad
-                    folderLauncher.launch(null)
-                },
-                onAddFolder = {
-                    folderPickMode = FolderPickMode.AddOnly
-                    folderLauncher.launch(null)
-                },
-                onSelectSavedFolder = { vm.loadFolder(this, it) },
-                onRemoveSavedFolder = vm::removeFolder,
-                onSelectSubtitleSource = vm::setSubtitleSource,
-                onSelectMatchMode = vm::setMatchMode,
-                onMatchSubtitle = vm::matchSubtitle,
-                onConfirmCandidate = vm::confirmCandidate,
-                onDismissCandidates = vm::dismissCandidates,
-                onOpenVideoDownload = {
-                    startActivity(Intent(this@MainActivity, VideoDownloadActivity::class.java))
-                },
-            )
+            Box(modifier = Modifier.fillMaxSize()) {
+                when (currentPage) {
+                    AppPage.SubtitleMatch ->
+                        AppScreen(
+                            state = state,
+                            onPickFolder = {
+                                folderPickMode = FolderPickMode.OpenAndLoad
+                                folderLauncher.launch(null)
+                            },
+                            onAddFolder = {
+                                folderPickMode = FolderPickMode.AddOnly
+                                folderLauncher.launch(null)
+                            },
+                            onSelectSavedFolder = { vm.loadFolder(this@MainActivity, it) },
+                            onRemoveSavedFolder = vm::removeFolder,
+                            onSelectSubtitleSource = vm::setSubtitleSource,
+                            onSelectMatchMode = vm::setMatchMode,
+                            onMatchSubtitle = vm::matchSubtitle,
+                            onConfirmCandidate = vm::confirmCandidate,
+                            onDismissCandidates = vm::dismissCandidates,
+                        )
+
+                    AppPage.SeedDownload -> VideoDownloadPage()
+                    AppPage.WordNote -> WordNotePage()
+                }
+
+                TextButton(
+                    onClick = { sidebarVisible = true },
+                    modifier =
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .statusBarsPadding()
+                            .padding(top = 6.dp, end = 8.dp),
+                ) {
+                    Text("页面")
+                }
+
+                RightSidebar(
+                    visible = sidebarVisible,
+                    currentPage = currentPage,
+                    pages = AppPage.entries.toList(),
+                    onDismiss = { sidebarVisible = false },
+                    onSelectPage = {
+                        currentPage = it
+                        sidebarVisible = false
+                    },
+                )
+            }
         }
     }
 
@@ -130,6 +165,14 @@ class MainActivity : ComponentActivity() {
         } catch (_: SecurityException) {
         }
     }
+}
+
+private enum class AppPage(
+    val label: String,
+) {
+    SubtitleMatch("字幕匹配"),
+    SeedDownload("种子下载"),
+    WordNote("单词摘记"),
 }
 
 data class VideoItem(
@@ -185,6 +228,60 @@ enum class MatchMode(
 ) {
     Auto("自动"),
     Candidate("候选"),
+}
+
+@Composable
+private fun RightSidebar(
+    visible: Boolean,
+    currentPage: AppPage,
+    pages: List<AppPage>,
+    onDismiss: () -> Unit,
+    onSelectPage: (AppPage) -> Unit,
+) {
+    if (!visible) return
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.35f))
+                    .clickable(onClick = onDismiss),
+        )
+        Card(
+            modifier =
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(220.dp),
+        ) {
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "页面导航",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                pages.forEach { page ->
+                    Button(
+                        onClick = { onSelectPage(page) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = page != currentPage,
+                    ) {
+                        Text(page.label)
+                    }
+                }
+                TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+                    Text("关闭")
+                }
+            }
+        }
+    }
 }
 
 class MainViewModel(
@@ -673,7 +770,6 @@ private fun AppScreen(
     onMatchSubtitle: (String) -> Unit,
     onConfirmCandidate: (Int) -> Unit,
     onDismissCandidates: () -> Unit,
-    onOpenVideoDownload: () -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
     var folderEditVisible by remember { mutableStateOf(false) }
@@ -685,7 +781,6 @@ private fun AppScreen(
                 matchMode = state.matchMode,
                 subtitleSource = state.subtitleSource,
                 folders = state.folderHistory,
-                onOpenVideoDownload = onOpenVideoDownload,
                 onOpenLog = { logVisible = true },
                 onSelectMatchMode = onSelectMatchMode,
                 onSelectSubtitleSource = onSelectSubtitleSource,
@@ -766,7 +861,6 @@ private fun AppTopBar(
     matchMode: MatchMode,
     subtitleSource: SubtitleSource,
     folders: List<SavedFolder>,
-    onOpenVideoDownload: () -> Unit,
     onOpenLog: () -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
@@ -791,13 +885,6 @@ private fun AppTopBar(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            TextButton(
-                onClick = onOpenVideoDownload,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.heightIn(min = 32.dp),
-            ) {
-                Text("种子")
-            }
             TextButton(
                 onClick = onOpenLog,
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),

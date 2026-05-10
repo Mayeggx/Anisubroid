@@ -1,51 +1,48 @@
 # Anisubroid
 
-Anisubroid 是一个 Android 应用，用于扫描本地视频并自动从 `jimaku.cc` 匹配和下载字幕。
+Anisubroid 是一个 Android 应用，当前包含三个可切换页面：
 
-## 字幕匹配基本逻辑
+1. 字幕匹配（主页面）
+2. 种子下载
+3. 单词摘记
 
-1. 解析本地视频文件名
-- 提取集数（支持 `S02E07`、`Episode 07`、`- 07`、`第07话` 等格式）。
-- 尝试提取季信息（如 `S2`、`Season 2`、`2nd Season`）。
-- 清洗标题噪声（发布组、编码信息、分辨率等）得到基础剧名。
+页面切换方式：点击主界面右上角“页面”按钮，呼出右侧栏后进行切换。
 
-2. 在 Jimaku 匹配剧集条目（entry）
-- 读取 `https://jimaku.cc/` 首页条目列表（`/entry/{id}`）。
-- 对每个 entry 标题进行打分：
-  - token overlap（词项重合度）
-  - 包含关系加分
-  - 季信息加分
-- 选取得分最高且超过阈值的 entry。
+## 页面说明
 
-3. 在 entry 内匹配具体字幕文件
-- 打开 `https://jimaku.cc/entry/{id}`，解析下载文件列表。
-- 以“集数一致”为硬条件筛选候选文件。
-- 再按文件类型和标题相关度排序（默认偏好 `srt`、`ass`）。
+### 1) 字幕匹配
+- 扫描本地视频文件夹
+- 匹配并下载字幕（支持来源切换与匹配模式切换）
+- 支持日志查看、文件夹管理、候选字幕确认
 
-4. 下载并保存
-- 使用 SAF（`DocumentFile`）将字幕保存到视频同目录。
-- 若同名文件存在，当前策略为覆盖。
+### 2) 种子下载
+- 原先通过顶部“种子”按钮进入
+- 现已改为通过右侧栏进入（顶部“种子”按钮已移除）
 
-## 当前状态
+### 3) 单词摘记
+- 复用了 `Pstankiroid` 的完整核心逻辑（先原样迁移，再接入页面）
+- 代码位置：`app/src/main/java/com/mayegg/anisub/wordnote`
+- 资源位置：`app/src/main/assets/prompts`
+- 依赖 AnkiDroid Provider：`com.ichi2.anki.flashcards`
 
-- 已接入真实匹配下载流程（非占位逻辑）。
-- 已支持实机 ADB 安装与验证。
-- 已修复一次正则兼容导致的匹配崩溃问题（`PatternSyntaxException`）。
+## 运行与调试（scripts）
 
-## 已知限制
-
-- 仍为启发式匹配，极端命名场景可能误匹配。
-- 暂未提供候选手动确认与偏好配置 UI。
-- 暂未补充自动化测试。
-
-## 运行与调试
-
-- 构建 Debug：
+### 构建 Debug APK
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-debug.ps1
 ```
 
-- 安装并启动：
+### ADB 安装、启动、导出日志
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-adb-debug.ps1 -InstallApk -LaunchApp
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-adb-debug.ps1 -InstallApk 1 -LaunchApp 1 -CaptureLog
 ```
+
+说明：
+- 日志默认导出到 `logs/adb-logcat-*.txt`，并同步为 `logs/adb-logcat-latest.txt`。
+- 若手机端弹出安装确认，请在设备上手动允许，否则会出现 `INSTALL_FAILED_ABORTED`。
+
+## 备注
+
+- 单词摘记页面需要设备已安装 AnkiDroid，并授予数据库读写权限：
+  `com.ichi2.anki.permission.READ_WRITE_DATABASE`
+- 若日志出现 `Failed to find provider info for com.ichi2.anki.flashcards`，说明 AnkiDroid Provider 当前不可用。
