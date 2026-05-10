@@ -127,6 +127,7 @@ class MainActivity : ComponentActivity() {
                             onSelectSubtitleSource = vm::setSubtitleSource,
                             onSelectMatchMode = vm::setMatchMode,
                             onMatchSubtitle = vm::matchSubtitle,
+                            onBatchMatchAuto = vm::batchMatchAuto,
                             onConfirmCandidate = vm::confirmCandidate,
                             onDismissCandidates = vm::dismissCandidates,
                         )
@@ -362,6 +363,7 @@ class MainViewModel(
     }
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
+    private val appContext = application.applicationContext
     private val jimakuMatcher = JimakuSubtitleMatcher(application)
     private val edatribeMatcher = EdatribeSubtitleMatcher(application)
     private val prefs = application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -501,39 +503,55 @@ class MainViewModel(
         }
     }
 
-    fun batchMatchAuto(context: Context) {
+    fun batchMatchAuto() {
         val snapshot = _uiState.value
         if (snapshot.batchRunning) return
         if (snapshot.loading) return
-        val targets = snapshot.videos.filter { !hasExistingSubtitle(context, it.folderUri, it.title) }
-        if (targets.isEmpty()) {
-            _uiState.update { it.copy(message = "无需批量处理：当前视频都已有字幕。") }
-            Log.i(TAG_BATCH, "[BATCH] skip: no videos without subtitle")
-            return
-        }
-
         _uiState.update {
             it.copy(
                 batchRunning = true,
                 batchViewerVisible = true,
-                matchMode = MatchMode.Auto,
-                batchTotal = targets.size,
+                batchTotal = 0,
                 batchDone = 0,
-                batchLogs = listOf("批量开始：共 ${targets.size} 个待处理视频，来源=${snapshot.subtitleSource.label}"),
-                message = "批量自动匹配开始，共 ${targets.size} 个待处理视频。已切换到自动模式。",
+                batchLogs = listOf("批量准备中：正在扫描已有字幕并生成任务列表..."),
+                message = "批量准备中：正在扫描已有字幕并生成任务列表...",
             )
         }
-        Log.i(TAG_BATCH, "[BATCH] start count=${targets.size}, source=${snapshot.subtitleSource.label}")
+        Log.i(TAG_BATCH, "[BATCH] preparing targets...")
 
         batchJob = viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                val source = _uiState.value.subtitleSource
+                val state = _uiState.value
+                val source = state.subtitleSource
+                val targets = state.videos.filter { !hasExistingSubtitle(appContext, it.folderUri, it.title) }
+                if (targets.isEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            batchRunning = false,
+                            message = "无需批量处理：当前视频都已有字幕。",
+                        )
+                    }
+                    appendBatchLog("批量结束：无需处理，当前视频都已有字幕。")
+                    Log.i(TAG_BATCH, "[BATCH] skip: no videos without subtitle")
+                    return@runCatching
+                }
+                _uiState.update {
+                    it.copy(
+                        matchMode = MatchMode.Auto,
+                        batchTotal = targets.size,
+                        batchDone = 0,
+                        batchLogs = listOf("批量开始：共 ${targets.size} 个待处理视频，来源=${source.label}"),
+                        message = "批量自动匹配开始，共 ${targets.size} 个待处理视频。已切换到自动模式。",
+                    )
+                }
+                Log.i(TAG_BATCH, "[BATCH] start count=${targets.size}, source=${source.label}")
+
                 var success = 0
                 var failed = 0
                 var skipped = 0
                 targets.forEachIndexed { index, video ->
                     val seq = index + 1
-                    if (hasExistingSubtitle(context, video.folderUri, video.title)) {
+                    if (hasExistingSubtitle(appContext, video.folderUri, video.title)) {
                         skipped += 1
                         Log.i(TAG_BATCH, "[BATCH] [$seq/${targets.size}] skip(existing): ${video.title}")
                         appendBatchLog("[$seq/${targets.size}] 跳过（已存在字幕）：${video.title}")
@@ -833,6 +851,7 @@ private fun AppScreen(
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
     onMatchSubtitle: (String) -> Unit,
+    onBatchMatchAuto: () -> Unit,
     onConfirmCandidate: (Int) -> Unit,
     onDismissCandidates: () -> Unit,
 ) {
@@ -845,8 +864,10 @@ private fun AppScreen(
                 folderLabel = state.folderLabel,
                 matchMode = state.matchMode,
                 subtitleSource = state.subtitleSource,
+                batchRunning = state.batchRunning,
                 folders = state.folderHistory,
                 onOpenLog = { logVisible = true },
+                onBatchMatchAuto = onBatchMatchAuto,
                 onSelectMatchMode = onSelectMatchMode,
                 onSelectSubtitleSource = onSelectSubtitleSource,
                 onSelectSavedFolder = onSelectSavedFolder,
@@ -925,8 +946,10 @@ private fun AppTopBar(
     folderLabel: String,
     matchMode: MatchMode,
     subtitleSource: SubtitleSource,
+    batchRunning: Boolean,
     folders: List<SavedFolder>,
     onOpenLog: () -> Unit,
+    onBatchMatchAuto: () -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
     onSelectSavedFolder: (Uri) -> Unit,
@@ -956,6 +979,14 @@ private fun AppTopBar(
                 modifier = Modifier.heightIn(min = 32.dp),
             ) {
                 Text("日志")
+            }
+            TextButton(
+                onClick = onBatchMatchAuto,
+                enabled = !batchRunning,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.heightIn(min = 32.dp),
+            ) {
+                Text(if (batchRunning) "批量中..." else "批量")
             }
             MatchModeDropdown(
                 selected = matchMode,
