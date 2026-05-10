@@ -51,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -1158,7 +1159,10 @@ private fun Boolean?.toStatusText(): String =
     }
 
 @Composable
-fun WordNotePage() {
+fun WordNotePage(
+    openFolderUri: String? = null,
+    openFolderRequestNonce: Long = 0L,
+) {
     val context = LocalContext.current
     PstankidroidTheme {
         val viewModel: MainViewModel =
@@ -1180,22 +1184,40 @@ fun WordNotePage() {
             rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
                 viewModel.refreshStatus()
             }
+
+        val openFolder: (Uri, Boolean) -> Unit = { uri, replaceDrafts ->
+            persistUriForWordNote(context, uri)
+            val folderLabel = resolveFolderLabelForWordNote(context, uri)
+            viewModel.setCurrentFolder(uri.toString(), folderLabel)
+            val imageUris = collectImageUrisFromTreeForWordNote(context, uri)
+            if (replaceDrafts) {
+                viewModel.clearDrafts()
+            }
+            if (imageUris.isEmpty()) {
+                AppLogger.w("FolderImport", "No images found in $uri")
+                viewModel.updateStatusMessage("所选文件夹内没有图片")
+            } else {
+                imageUris.forEach { imageUri -> persistUriForWordNote(context, imageUri) }
+                viewModel.onImagesSelected(imageUris)
+            }
+        }
+
         val folderLauncher =
             rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
-                    persistUriForWordNote(context, it)
-                    val folderLabel = resolveFolderLabelForWordNote(context, it)
-                    viewModel.setCurrentFolder(it.toString(), folderLabel)
-                    val imageUris = collectImageUrisFromTreeForWordNote(context, it)
-                    if (imageUris.isEmpty()) {
-                        AppLogger.w("FolderImport", "No images found in $it")
-                        viewModel.updateStatusMessage("所选文件夹内没有图片")
-                    } else {
-                        imageUris.forEach { imageUri -> persistUriForWordNote(context, imageUri) }
-                        viewModel.onImagesSelected(imageUris)
-                    }
+                    openFolder(it, false)
                 }
             }
+
+        LaunchedEffect(openFolderRequestNonce) {
+            if (openFolderRequestNonce <= 0L || openFolderUri.isNullOrBlank()) return@LaunchedEffect
+            val uri = runCatching { Uri.parse(openFolderUri) }.getOrNull()
+            if (uri == null) {
+                viewModel.updateStatusMessage("无法打开摘记文件夹：路径无效。")
+                return@LaunchedEffect
+            }
+            openFolder(uri, true)
+        }
 
         MainScreen(
             state = state,

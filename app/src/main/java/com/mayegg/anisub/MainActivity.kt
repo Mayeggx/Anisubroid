@@ -98,6 +98,8 @@ class MainActivity : ComponentActivity() {
             var currentPage by rememberSaveable { mutableStateOf(AppPage.SubtitleMatch) }
             var sidebarVisible by rememberSaveable { mutableStateOf(false) }
             var aboutVisible by rememberSaveable { mutableStateOf(false) }
+            var wordNoteOpenFolderUri by rememberSaveable { mutableStateOf<String?>(null) }
+            var wordNoteOpenRequestNonce by rememberSaveable { mutableStateOf(0L) }
 
             val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
@@ -139,8 +141,20 @@ class MainActivity : ComponentActivity() {
                         )
 
                     AppPage.SeedDownload -> VideoDownloadEmbeddedPage()
-                    AppPage.WordNote -> WordNotePage()
-                    AppPage.RemoteSync -> RemoteSyncPage()
+                    AppPage.WordNote ->
+                        WordNotePage(
+                            openFolderUri = wordNoteOpenFolderUri,
+                            openFolderRequestNonce = wordNoteOpenRequestNonce,
+                        )
+
+                    AppPage.RemoteSync ->
+                        RemoteSyncPage(
+                            onOpenWordNoteForFolder = { folderUri ->
+                                wordNoteOpenFolderUri = folderUri
+                                wordNoteOpenRequestNonce += 1
+                                currentPage = AppPage.WordNote
+                            },
+                        )
                 }
 
                 FloatingActionButton(

@@ -125,7 +125,9 @@ data class RemoteSyncUiState(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RemoteSyncPage() {
+fun RemoteSyncPage(
+    onOpenWordNoteForFolder: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     val viewModel: RemoteSyncViewModel = viewModel()
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -133,6 +135,7 @@ fun RemoteSyncPage() {
     var pendingName by rememberSaveable { mutableStateOf("") }
     var qualityDraft by remember(state.config.imageJpegQuality) { mutableStateOf(state.config.imageJpegQuality.toString()) }
     var showDeleteDialogFor by remember { mutableStateOf<SyncEntryUi?>(null) }
+    var showClearDialogFor by remember { mutableStateOf<SyncEntryUi?>(null) }
     var showGitConfigDialog by remember { mutableStateOf(false) }
     var showCreateEntryDialog by remember { mutableStateOf(false) }
     var showImageQualityDialog by remember { mutableStateOf(false) }
@@ -221,6 +224,8 @@ fun RemoteSyncPage() {
             }
 
             items(state.entries, key = { it.id }) { entry ->
+                val canPush = shouldShowPushButton(entry, state.deviceId)
+                val hasLocalFolder = !entry.folderUri.isNullOrBlank()
                 Card {
                     Column(
                         modifier = Modifier.padding(12.dp),
@@ -235,10 +240,22 @@ fun RemoteSyncPage() {
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (canPush) {
+                                Button(
+                                    onClick = { viewModel.push(entry.id) },
+                                    enabled = !state.loading,
+                                ) { Text("Push") }
+                            }
                             Button(
-                                onClick = { viewModel.push(entry.id) },
-                                enabled = !state.loading && !entry.folderUri.isNullOrBlank(),
-                            ) { Text("Push") }
+                                onClick = { showClearDialogFor = entry },
+                                enabled = !state.loading,
+                            ) { Text("清空") }
+                            if (hasLocalFolder) {
+                                Button(
+                                    onClick = { onOpenWordNoteForFolder(entry.folderUri.orEmpty()) },
+                                    enabled = !state.loading,
+                                ) { Text("摘记") }
+                            }
                             Button(
                                 onClick = { showDeleteDialogFor = entry },
                                 enabled = !state.loading,
@@ -264,6 +281,29 @@ fun RemoteSyncPage() {
                 ) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showDeleteDialogFor = null }) { Text("取消") } },
+        )
+    }
+
+    showClearDialogFor?.let { entry ->
+        val clearTargetText =
+            if (entry.folderUri.isNullOrBlank()) {
+                "仓库子文件夹"
+            } else {
+                "仓库子文件夹和本地绑定文件夹内容"
+            }
+        AlertDialog(
+            onDismissRequest = { showClearDialogFor = null },
+            title = { Text("清空条目") },
+            text = { Text("确认清空 `${entry.displayName}` 对应的$clearTargetText，并 push 到远程吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearDialogFor = null
+                        viewModel.clear(entry.id)
+                    },
+                ) { Text("确认") }
+            },
+            dismissButton = { TextButton(onClick = { showClearDialogFor = null }) { Text("取消") } },
         )
     }
 
@@ -471,11 +511,45 @@ class RemoteSyncViewModel(
     fun push(entryId: String) {
         runTask {
             val config = store.loadConfig()
-            val entry = store.loadBindings().firstOrNull { it.id == entryId }
-                ?: throw IllegalStateException("找不到本地条目，无法 Push。")
+            val entry = requirePushableBinding(entryId)
             val stats = gitService.pushEntry(config = config, entry = entry)
             refreshEntryListInternal()
-            "Push 完成：${entry.displayName}，复制 ${stats.copiedFiles} 个文件，压缩 ${stats.compressedImages} 张图片。"
+            "Push 完成：${entry.displayName}，复制 ${stats.copiedFiles} 个文件，压缩 ${stats.compressedImages} 张图片，跳过重名 ${stats.skippedFiles} 个文件。"
+        }
+    }
+
+    fun clear(entryId: String) {
+        runTask {
+            val config = store.loadConfig()
+            val localBindings = store.loadBindings()
+            val knownEntries = mergeEntries(localBindings, gitService.scanRemoteEntries(), emptyMap())
+            val entry = knownEntries.firstOrNull { it.id == entryId } ?: throw IllegalStateException("条目不存在。")
+            val localBinding = localBindings.firstOrNull { it.id == entryId }
+            val deletedFiles =
+                localBinding
+                    ?.folderUri
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { clearFolderTreeContents(appContext, it) }
+            gitService.clearEntry(
+                config = config,
+                entry =
+                    RepoEntryMeta(
+                        id = entry.id,
+                        displayName = entry.displayName,
+                        deviceId = entry.deviceId,
+                        deviceName = entry.deviceName,
+                        repoPath = entry.repoPath,
+                        updatedAt = entry.updatedAt,
+                    ),
+            )
+            refreshEntryListInternal()
+            val localMessage =
+                if (deletedFiles == null) {
+                    "无本地绑定，已仅清空远端。"
+                } else {
+                    "本地删除 $deletedFiles 个文件，远端已推送。"
+                }
+            "清空完成：${entry.displayName}，$localMessage"
         }
     }
 
@@ -519,6 +593,15 @@ class RemoteSyncViewModel(
             }
         val merged = mergeEntries(localBindings, remoteEntries, folderFileCounts)
         _uiState.update { it.copy(entries = merged, config = store.loadConfig()) }
+    }
+
+    private fun requirePushableBinding(entryId: String): EntryBinding {
+        val entry = store.loadBindings().firstOrNull { it.id == entryId }
+            ?: throw IllegalStateException("找不到本地绑定条目。")
+        if (entry.deviceId != deviceInfo.id || entry.folderUri.isBlank()) {
+            throw IllegalStateException("该条目不支持当前设备执行 Push。")
+        }
+        return entry
     }
 }
 
@@ -655,6 +738,38 @@ private class RemoteSyncGitService(
                 paths = listOf(entry.repoPath),
             )
             return stats
+        } finally {
+            git.close()
+        }
+    }
+
+    fun clearEntry(
+        config: RemoteSyncConfig,
+        entry: RepoEntryMeta,
+    ) {
+        val git = openOrCreateRepository(config)
+        try {
+            safePull(git, config)
+            val targetDir = File(repoDir, entry.repoPath)
+            clearDirectoryContents(targetDir)
+            writeEntryMetadata(
+                targetDir = targetDir,
+                entry =
+                    RepoEntryMeta(
+                        id = entry.id,
+                        displayName = entry.displayName,
+                        deviceId = entry.deviceId,
+                        deviceName = entry.deviceName,
+                        repoPath = entry.repoPath,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+            )
+            commitAndPushIfNeeded(
+                git = git,
+                config = config,
+                message = "sync: clear ${entry.displayName} (${entry.deviceName})",
+                paths = listOf(entry.repoPath),
+            )
         } finally {
             git.close()
         }
@@ -806,6 +921,16 @@ private class RemoteSyncGitService(
                 .put("updatedAt", entry.updatedAt)
         metaFile.writeText(json.toString(2), Charsets.UTF_8)
     }
+
+    private fun clearDirectoryContents(directory: File) {
+        if (!directory.exists()) {
+            directory.mkdirs()
+            return
+        }
+        directory.listFiles().orEmpty().forEach { child ->
+            child.deleteRecursively()
+        }
+    }
 }
 
 private fun mergeEntries(
@@ -854,6 +979,11 @@ private fun mergeEntries(
     return merged.sortedWith(compareByDescending<SyncEntryUi> { it.updatedAt }.thenBy { it.displayName.lowercase(Locale.ROOT) })
 }
 
+internal fun shouldShowPushButton(
+    entry: SyncEntryUi,
+    currentDeviceId: String,
+): Boolean = entry.deviceId == currentDeviceId && !entry.folderUri.isNullOrBlank()
+
 private data class DeviceInfo(
     val id: String,
     val name: String,
@@ -867,11 +997,13 @@ private data class ImageCompressionSetting(
 private data class CopyStats(
     val copiedFiles: Int = 0,
     val compressedImages: Int = 0,
+    val skippedFiles: Int = 0,
 ) {
     operator fun plus(other: CopyStats): CopyStats =
         CopyStats(
             copiedFiles = copiedFiles + other.copiedFiles,
             compressedImages = compressedImages + other.compressedImages,
+            skippedFiles = skippedFiles + other.skippedFiles,
         )
 }
 
@@ -930,6 +1062,42 @@ private fun countFilesRecursively(directory: DocumentFile): Int {
     return total
 }
 
+private fun clearFolderTreeContents(
+    context: Context,
+    folderUri: String,
+): Int {
+    val treeUri = runCatching { Uri.parse(folderUri) }.getOrNull() ?: throw IllegalStateException("本地绑定路径无效。")
+    val root = DocumentFile.fromTreeUri(context, treeUri) ?: throw IllegalStateException("无法访问本地绑定文件夹。")
+    if (!root.exists() || !root.isDirectory) throw IllegalStateException("本地绑定路径不是文件夹。")
+    return deleteDocumentChildren(root)
+}
+
+private fun deleteDocumentChildren(directory: DocumentFile): Int {
+    var deletedFileCount = 0
+    directory.listFiles().forEach { child ->
+        when {
+            child.isDirectory -> {
+                deletedFileCount += deleteDocumentChildren(child)
+                if (!child.delete()) {
+                    throw IllegalStateException("无法删除目录: ${child.uri}")
+                }
+            }
+            child.isFile -> {
+                if (!child.delete()) {
+                    throw IllegalStateException("无法删除文件: ${child.uri}")
+                }
+                deletedFileCount += 1
+            }
+            else -> {
+                if (!child.delete()) {
+                    throw IllegalStateException("无法删除条目: ${child.uri}")
+                }
+            }
+        }
+    }
+    return deletedFileCount
+}
+
 private fun copyFolderTree(
     context: Context,
     resolver: ContentResolver,
@@ -980,9 +1148,11 @@ private fun copySingleFile(
     resolver: ContentResolver,
     setting: ImageCompressionSetting,
 ): CopyStats {
+    val shouldCompress = shouldCompressImage(doc)
+    val parentDir = target.parentFile ?: throw IllegalStateException("目标文件路径无效: ${target.absolutePath}")
     val targetFile =
-        if (shouldCompressImage(doc)) {
-            File(target.parentFile, buildCompressedImageName(target.name))
+        if (shouldCompress) {
+            File(parentDir, buildCompressedImageName(target.name))
         } else {
             target
         }
@@ -991,8 +1161,16 @@ private fun copySingleFile(
         targetFile.parentFile.mkdirs()
     }
 
-    if (shouldCompressImage(doc) && compressImageToJpeg(doc, targetFile, resolver, setting)) {
+    if (targetFile.exists()) {
+        return CopyStats(skippedFiles = 1)
+    }
+
+    if (shouldCompress && compressImageToJpeg(doc, targetFile, resolver, setting)) {
         return CopyStats(copiedFiles = 1, compressedImages = 1)
+    }
+
+    if (target.exists()) {
+        return CopyStats(skippedFiles = 1)
     }
 
     resolver.openInputStream(doc.uri).use { input ->
