@@ -4,6 +4,10 @@ import android.app.Application
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -65,6 +69,8 @@ private const val DEFAULT_REMOTE_URL = "https://gitee.com/mayeggx/pic4nisub.git"
 private const val DEFAULT_BRANCH = "main"
 private const val ENTRIES_DIR = "entries"
 private const val ENTRY_META_FILE = "entry.json"
+private const val DEFAULT_IMAGE_SCALE_PERCENT = 50
+private const val DEFAULT_IMAGE_JPEG_QUALITY = 70
 
 data class RemoteSyncConfig(
     val remoteUrl: String = DEFAULT_REMOTE_URL,
@@ -72,6 +78,7 @@ data class RemoteSyncConfig(
     val gitToken: String = "",
     val commitUserName: String = "Anisubroid Remote Sync",
     val commitUserEmail: String = "anisubroid@local",
+    val imageJpegQuality: Int = DEFAULT_IMAGE_JPEG_QUALITY,
 )
 
 data class EntryBinding(
@@ -103,13 +110,14 @@ data class SyncEntryUi(
     val updatedAt: Long,
     val folderUri: String?,
     val folderLabel: String?,
+    val folderFileCount: Int? = null,
 )
 
 data class RemoteSyncUiState(
     val config: RemoteSyncConfig = RemoteSyncConfig(),
     val entries: List<SyncEntryUi> = emptyList(),
     val loading: Boolean = false,
-    val statusMessage: String = "请先填写 Git 账号和 Token，然后创建条目并执行 push。",
+    val statusMessage: String = "请先填写 Git 配置，然后创建条目并执行 Push。",
     val deviceId: String = "",
     val deviceName: String = "",
     val repoPath: String = "",
@@ -123,7 +131,11 @@ fun RemoteSyncPage() {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     var pendingName by rememberSaveable { mutableStateOf("") }
+    var qualityDraft by remember(state.config.imageJpegQuality) { mutableStateOf(state.config.imageJpegQuality.toString()) }
     var showDeleteDialogFor by remember { mutableStateOf<SyncEntryUi?>(null) }
+    var showGitConfigDialog by remember { mutableStateOf(false) }
+    var showCreateEntryDialog by remember { mutableStateOf(false) }
+    var showImageQualityDialog by remember { mutableStateOf(false) }
     var configDraft by remember(state.config) { mutableStateOf(state.config) }
 
     val folderLauncher =
@@ -137,11 +149,34 @@ fun RemoteSyncPage() {
                 folderLabel = label,
             )
             pendingName = ""
+            showCreateEntryDialog = false
         }
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("远程同步") })
+            TopAppBar(
+                title = { Text("远程同步") },
+                actions = {
+                    TextButton(
+                        onClick = {
+                            qualityDraft = state.config.imageJpegQuality.toString()
+                            showImageQualityDialog = true
+                        },
+                        enabled = !state.loading,
+                    ) { Text("图片质量") }
+                    TextButton(
+                        onClick = {
+                            configDraft = state.config
+                            showGitConfigDialog = true
+                        },
+                        enabled = !state.loading,
+                    ) { Text("Git配置") }
+                    TextButton(
+                        onClick = { showCreateEntryDialog = true },
+                        enabled = !state.loading,
+                    ) { Text("新建条目") }
+                },
+            )
         },
     ) { innerPadding ->
         LazyColumn(
@@ -160,6 +195,10 @@ fun RemoteSyncPage() {
                     ) {
                         Text("仓库 A: ${state.repoPath}", style = MaterialTheme.typography.bodySmall)
                         Text("当前设备: ${state.deviceName} (${state.deviceId})", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "图片压缩: 缩放 ${DEFAULT_IMAGE_SCALE_PERCENT}% + JPEG 质量 ${state.config.imageJpegQuality}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = viewModel::pull, enabled = !state.loading) { Text("Pull") }
                             Button(onClick = viewModel::refreshEntries, enabled = !state.loading) { Text("刷新列表") }
@@ -175,83 +214,8 @@ fun RemoteSyncPage() {
             }
 
             item {
-                Card {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("Git 配置")
-                        OutlinedTextField(
-                            value = configDraft.remoteUrl,
-                            onValueChange = { configDraft = configDraft.copy(remoteUrl = it) },
-                            label = { Text("远程仓库 URL") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                        )
-                        OutlinedTextField(
-                            value = configDraft.gitUsername,
-                            onValueChange = { configDraft = configDraft.copy(gitUsername = it) },
-                            label = { Text("Git 用户名") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                        )
-                        OutlinedTextField(
-                            value = configDraft.gitToken,
-                            onValueChange = { configDraft = configDraft.copy(gitToken = it) },
-                            label = { Text("Git Token/PAT") },
-                            modifier = Modifier.fillMaxWidth(),
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                        )
-                        OutlinedTextField(
-                            value = configDraft.commitUserName,
-                            onValueChange = { configDraft = configDraft.copy(commitUserName = it) },
-                            label = { Text("提交作者名") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                        )
-                        OutlinedTextField(
-                            value = configDraft.commitUserEmail,
-                            onValueChange = { configDraft = configDraft.copy(commitUserEmail = it) },
-                            label = { Text("提交作者邮箱") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = { viewModel.saveConfig(configDraft) },
-                                enabled = !state.loading,
-                            ) { Text("保存配置") }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Card {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("新建条目（绑定当前设备 + 文件夹 B）")
-                        OutlinedTextField(
-                            value = pendingName,
-                            onValueChange = { pendingName = it },
-                            label = { Text("条目名称（可空）") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                        )
-                        Button(
-                            onClick = { folderLauncher.launch(null) },
-                            enabled = !state.loading,
-                        ) { Text("选择文件夹 B 并创建条目") }
-                    }
-                }
-            }
-
-            item {
                 Text(
-                    text = "状态：${state.statusMessage}",
+                    text = "状态: ${state.statusMessage}",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -265,8 +229,9 @@ fun RemoteSyncPage() {
                         Text(entry.displayName, style = MaterialTheme.typography.titleMedium)
                         Text("设备: ${entry.deviceName} (${entry.deviceId})", style = MaterialTheme.typography.bodySmall)
                         Text("仓库路径: ${entry.repoPath}", style = MaterialTheme.typography.bodySmall)
+                        Text("本地绑定: ${entry.folderLabel ?: "无"}", style = MaterialTheme.typography.bodySmall)
                         Text(
-                            text = "本地绑定: ${entry.folderLabel ?: "无"}",
+                            "当前文件夹文件数量: ${entry.folderFileCount?.toString() ?: "-"}",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -301,6 +266,122 @@ fun RemoteSyncPage() {
             dismissButton = { TextButton(onClick = { showDeleteDialogFor = null }) { Text("取消") } },
         )
     }
+
+    if (showGitConfigDialog) {
+        AlertDialog(
+            onDismissRequest = { showGitConfigDialog = false },
+            title = { Text("Git 配置") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = configDraft.remoteUrl,
+                        onValueChange = { configDraft = configDraft.copy(remoteUrl = it) },
+                        label = { Text("远程仓库 URL") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = configDraft.gitUsername,
+                        onValueChange = { configDraft = configDraft.copy(gitUsername = it) },
+                        label = { Text("Git 用户名") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = configDraft.gitToken,
+                        onValueChange = { configDraft = configDraft.copy(gitToken = it) },
+                        label = { Text("Git Token/PAT") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = configDraft.commitUserName,
+                        onValueChange = { configDraft = configDraft.copy(commitUserName = it) },
+                        label = { Text("提交作者名") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = configDraft.commitUserEmail,
+                        onValueChange = { configDraft = configDraft.copy(commitUserEmail = it) },
+                        label = { Text("提交作者邮箱") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showGitConfigDialog = false
+                        viewModel.saveConfig(configDraft)
+                    },
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showGitConfigDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showCreateEntryDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateEntryDialog = false },
+            title = { Text("新建条目") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("绑定当前设备 + 文件夹 B")
+                    OutlinedTextField(
+                        value = pendingName,
+                        onValueChange = { pendingName = it },
+                        label = { Text("条目名称（可空）") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { folderLauncher.launch(null) }) {
+                    Text("选择文件夹B")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateEntryDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showImageQualityDialog) {
+        AlertDialog(
+            onDismissRequest = { showImageQualityDialog = false },
+            title = { Text("图片质量") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Push 前会把图片缩放到 50%，并转为 JPG。")
+                    OutlinedTextField(
+                        value = qualityDraft,
+                        onValueChange = { qualityDraft = it.filter { ch -> ch.isDigit() }.take(3) },
+                        label = { Text("JPG 质量 (1-100)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val quality = qualityDraft.toIntOrNull()?.coerceIn(1, 100) ?: DEFAULT_IMAGE_JPEG_QUALITY
+                        viewModel.updateImageQuality(quality)
+                        showImageQualityDialog = false
+                    },
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImageQualityDialog = false }) { Text("取消") }
+            },
+        )
+    }
 }
 
 class RemoteSyncViewModel(
@@ -327,13 +408,19 @@ class RemoteSyncViewModel(
     }
 
     fun saveConfig(config: RemoteSyncConfig) {
-        store.saveConfig(config)
+        val normalized = config.copy(imageJpegQuality = config.imageJpegQuality.coerceIn(1, 100))
+        store.saveConfig(normalized)
         _uiState.update {
             it.copy(
-                config = config,
+                config = normalized,
                 statusMessage = "配置已保存。",
             )
         }
+    }
+
+    fun updateImageQuality(quality: Int) {
+        val current = store.loadConfig()
+        saveConfig(current.copy(imageJpegQuality = quality.coerceIn(1, 100)))
     }
 
     fun refreshEntries() {
@@ -385,10 +472,10 @@ class RemoteSyncViewModel(
         runTask {
             val config = store.loadConfig()
             val entry = store.loadBindings().firstOrNull { it.id == entryId }
-                ?: throw IllegalStateException("找不到本地条目，无法 push。")
-            gitService.pushEntry(config = config, entry = entry)
+                ?: throw IllegalStateException("找不到本地条目，无法 Push。")
+            val stats = gitService.pushEntry(config = config, entry = entry)
             refreshEntryListInternal()
-            "Push 完成：${entry.displayName}"
+            "Push 完成：${entry.displayName}，复制 ${stats.copiedFiles} 个文件，压缩 ${stats.compressedImages} 张图片。"
         }
     }
 
@@ -396,7 +483,7 @@ class RemoteSyncViewModel(
         runTask {
             val config = store.loadConfig()
             val localBindings = store.loadBindings()
-            val knownEntries = mergeEntries(localBindings, gitService.scanRemoteEntries())
+            val knownEntries = mergeEntries(localBindings, gitService.scanRemoteEntries(), emptyMap())
             val entry = knownEntries.firstOrNull { it.id == entryId } ?: throw IllegalStateException("条目不存在。")
             gitService.deleteEntry(config, entry.repoPath)
             store.saveBindings(localBindings.filterNot { it.id == entryId })
@@ -426,8 +513,12 @@ class RemoteSyncViewModel(
     private fun refreshEntryListInternal() {
         val localBindings = store.loadBindings()
         val remoteEntries = runCatching { gitService.scanRemoteEntries() }.getOrDefault(emptyList())
-        val merged = mergeEntries(localBindings, remoteEntries)
-        _uiState.update { it.copy(entries = merged) }
+        val folderFileCounts =
+            localBindings.associate { binding ->
+                binding.id to countFilesInFolderTree(appContext, binding.folderUri)
+            }
+        val merged = mergeEntries(localBindings, remoteEntries, folderFileCounts)
+        _uiState.update { it.copy(entries = merged, config = store.loadConfig()) }
     }
 }
 
@@ -447,6 +538,7 @@ private class RemoteSyncStore(
                 gitToken = json.optString("gitToken", ""),
                 commitUserName = json.optString("commitUserName", "Anisubroid Remote Sync"),
                 commitUserEmail = json.optString("commitUserEmail", "anisubroid@local"),
+                imageJpegQuality = json.optInt("imageJpegQuality", DEFAULT_IMAGE_JPEG_QUALITY),
             )
         }.getOrDefault(RemoteSyncConfig())
     }
@@ -459,6 +551,7 @@ private class RemoteSyncStore(
                 .put("gitToken", config.gitToken)
                 .put("commitUserName", config.commitUserName)
                 .put("commitUserEmail", config.commitUserEmail)
+                .put("imageJpegQuality", config.imageJpegQuality.coerceIn(1, 100))
         prefs.edit().putString("config", json.toString()).apply()
     }
 
@@ -513,26 +606,36 @@ private class RemoteSyncGitService(
 
     fun pull(config: RemoteSyncConfig) {
         val git = openOrCreateRepository(config)
-        git.use { safePull(it, config) }
+        try {
+            safePull(git, config)
+        } finally {
+            git.close()
+        }
     }
 
     fun pushEntry(
         config: RemoteSyncConfig,
         entry: EntryBinding,
-    ) {
+    ): CopyStats {
         val git = openOrCreateRepository(config)
-        git.use {
-            safePull(it, config)
+        try {
+            safePull(git, config)
             val targetDir = File(repoDir, entry.repoPath)
             if (targetDir.exists()) {
                 targetDir.deleteRecursively()
             }
-            copyFolderTree(
-                context = context,
-                resolver = context.contentResolver,
-                treeUri = Uri.parse(entry.folderUri),
-                destinationDir = targetDir,
-            )
+            val stats =
+                copyFolderTree(
+                    context = context,
+                    resolver = context.contentResolver,
+                    treeUri = Uri.parse(entry.folderUri),
+                    destinationDir = targetDir,
+                    setting =
+                        ImageCompressionSetting(
+                            scalePercent = DEFAULT_IMAGE_SCALE_PERCENT,
+                            jpegQuality = config.imageJpegQuality.coerceIn(1, 100),
+                        ),
+                )
             writeEntryMetadata(
                 targetDir = targetDir,
                 entry =
@@ -546,11 +649,14 @@ private class RemoteSyncGitService(
                     ),
             )
             commitAndPushIfNeeded(
-                git = it,
+                git = git,
                 config = config,
                 message = "sync: push ${entry.displayName} (${entry.deviceName})",
                 paths = listOf(entry.repoPath),
             )
+            return stats
+        } finally {
+            git.close()
         }
     }
 
@@ -559,18 +665,20 @@ private class RemoteSyncGitService(
         repoPath: String,
     ) {
         val git = openOrCreateRepository(config)
-        git.use {
-            safePull(it, config)
+        try {
+            safePull(git, config)
             val targetDir = File(repoDir, repoPath)
             if (targetDir.exists()) {
                 targetDir.deleteRecursively()
             }
             commitAndPushIfNeeded(
-                git = it,
+                git = git,
                 config = config,
                 message = "sync: delete $repoPath",
                 paths = listOf(repoPath),
             )
+        } finally {
+            git.close()
         }
     }
 
@@ -663,8 +771,7 @@ private class RemoteSyncGitService(
             git.add().addFilepattern(path).call()
             git.add().setUpdate(true).addFilepattern(path).call()
         }
-        val hasChanges = git.status().call().hasUncommittedChanges()
-        if (!hasChanges) return
+        if (!git.status().call().hasUncommittedChanges()) return
 
         git.commit().setMessage(message).call()
         try {
@@ -673,7 +780,7 @@ private class RemoteSyncGitService(
                 .setCredentialsProvider(credentials(config))
                 .setRefSpecs(RefSpec("refs/heads/$DEFAULT_BRANCH:refs/heads/$DEFAULT_BRANCH"))
                 .call()
-        } catch (ex: TransportException) {
+        } catch (_: TransportException) {
             safePull(git, config)
             git.push()
                 .setRemote("origin")
@@ -704,6 +811,7 @@ private class RemoteSyncGitService(
 private fun mergeEntries(
     localBindings: List<EntryBinding>,
     remoteEntries: List<RepoEntryMeta>,
+    folderFileCounts: Map<String, Int?>,
 ): List<SyncEntryUi> {
     val localById = localBindings.associateBy { it.id }
     val merged = mutableListOf<SyncEntryUi>()
@@ -722,6 +830,7 @@ private fun mergeEntries(
                 updatedAt = max(remote.updatedAt, local?.updatedAt ?: 0L),
                 folderUri = local?.folderUri,
                 folderLabel = local?.folderLabel,
+                folderFileCount = folderFileCounts[remote.id],
             )
     }
 
@@ -738,6 +847,7 @@ private fun mergeEntries(
                     updatedAt = local.updatedAt,
                     folderUri = local.folderUri,
                     folderLabel = local.folderLabel,
+                    folderFileCount = folderFileCounts[local.id],
                 )
         }
 
@@ -748,6 +858,22 @@ private data class DeviceInfo(
     val id: String,
     val name: String,
 )
+
+private data class ImageCompressionSetting(
+    val scalePercent: Int,
+    val jpegQuality: Int,
+)
+
+private data class CopyStats(
+    val copiedFiles: Int = 0,
+    val compressedImages: Int = 0,
+) {
+    operator fun plus(other: CopyStats): CopyStats =
+        CopyStats(
+            copiedFiles = copiedFiles + other.copiedFiles,
+            compressedImages = compressedImages + other.compressedImages,
+        )
+}
 
 private fun resolveDeviceInfo(context: Context): DeviceInfo {
     val rawId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
@@ -783,39 +909,176 @@ private fun persistTreePermission(
     }
 }
 
+private fun countFilesInFolderTree(
+    context: Context,
+    folderUri: String,
+): Int? {
+    val treeUri = runCatching { Uri.parse(folderUri) }.getOrNull() ?: return null
+    val root = DocumentFile.fromTreeUri(context, treeUri) ?: return null
+    if (!root.exists() || !root.isDirectory) return null
+    return runCatching { countFilesRecursively(root) }.getOrNull()
+}
+
+private fun countFilesRecursively(directory: DocumentFile): Int {
+    var total = 0
+    directory.listFiles().forEach { child ->
+        when {
+            child.isDirectory -> total += countFilesRecursively(child)
+            child.isFile -> total += 1
+        }
+    }
+    return total
+}
+
 private fun copyFolderTree(
     context: Context,
     resolver: ContentResolver,
     treeUri: Uri,
     destinationDir: File,
-) {
+    setting: ImageCompressionSetting,
+): CopyStats {
     val root = DocumentFile.fromTreeUri(context, treeUri)
         ?: throw IllegalStateException("无法访问所选文件夹。")
     if (!root.isDirectory) throw IllegalStateException("所选路径不是文件夹。")
-    copyDocumentChildren(root, destinationDir, resolver)
+    return copyDocumentChildren(
+        sourceDir = root,
+        destinationDir = destinationDir,
+        resolver = resolver,
+        setting = setting,
+    )
 }
 
 private fun copyDocumentChildren(
     sourceDir: DocumentFile,
     destinationDir: File,
     resolver: ContentResolver,
-) {
+    setting: ImageCompressionSetting,
+): CopyStats {
     if (!destinationDir.exists() && !destinationDir.mkdirs()) {
         throw IllegalStateException("无法创建目录: ${destinationDir.absolutePath}")
     }
+
+    var stats = CopyStats()
     sourceDir.listFiles().forEach { doc ->
         val name = doc.name ?: return@forEach
         val target = File(destinationDir, name)
         when {
-            doc.isDirectory -> copyDocumentChildren(doc, target, resolver)
+            doc.isDirectory -> {
+                stats += copyDocumentChildren(doc, target, resolver, setting)
+            }
             doc.isFile -> {
-                resolver.openInputStream(doc.uri).use { input ->
-                    if (input == null) return@forEach
-                    if (!target.parentFile.exists()) target.parentFile.mkdirs()
-                    FileOutputStream(target).use { output -> input.copyTo(output) }
-                }
+                stats += copySingleFile(doc, target, resolver, setting)
             }
         }
+    }
+    return stats
+}
+
+private fun copySingleFile(
+    doc: DocumentFile,
+    target: File,
+    resolver: ContentResolver,
+    setting: ImageCompressionSetting,
+): CopyStats {
+    val targetFile =
+        if (shouldCompressImage(doc)) {
+            File(target.parentFile, buildCompressedImageName(target.name))
+        } else {
+            target
+        }
+
+    if (!targetFile.parentFile.exists()) {
+        targetFile.parentFile.mkdirs()
+    }
+
+    if (shouldCompressImage(doc) && compressImageToJpeg(doc, targetFile, resolver, setting)) {
+        return CopyStats(copiedFiles = 1, compressedImages = 1)
+    }
+
+    resolver.openInputStream(doc.uri).use { input ->
+        if (input == null) throw IllegalStateException("无法读取文件: ${doc.uri}")
+        FileOutputStream(target).use { output -> input.copyTo(output) }
+    }
+    return CopyStats(copiedFiles = 1, compressedImages = 0)
+}
+
+private fun shouldCompressImage(doc: DocumentFile): Boolean {
+    val mime = doc.type.orEmpty().lowercase(Locale.ROOT)
+    if (mime.startsWith("image/")) return true
+    val name = doc.name.orEmpty().lowercase(Locale.ROOT)
+    return name.endsWith(".jpg") ||
+        name.endsWith(".jpeg") ||
+        name.endsWith(".png") ||
+        name.endsWith(".webp") ||
+        name.endsWith(".gif") ||
+        name.endsWith(".bmp")
+}
+
+private fun buildCompressedImageName(originalName: String): String {
+    val lower = originalName.lowercase(Locale.ROOT)
+    return if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+        "${originalName.substringBeforeLast('.', originalName)}.jpg"
+    } else {
+        "$originalName.jpg"
+    }
+}
+
+private fun compressImageToJpeg(
+    doc: DocumentFile,
+    targetFile: File,
+    resolver: ContentResolver,
+    setting: ImageCompressionSetting,
+): Boolean {
+    val decoded =
+        resolver.openInputStream(doc.uri).use { input ->
+            if (input == null) return false
+            BitmapFactory.decodeStream(input)
+        } ?: return false
+
+    var scaled: Bitmap? = null
+    var rgbBitmap: Bitmap? = null
+
+    return try {
+        val scale = setting.scalePercent.coerceIn(1, 100)
+        val targetWidth = max(1, decoded.width * scale / 100)
+        val targetHeight = max(1, decoded.height * scale / 100)
+        scaled =
+            if (targetWidth == decoded.width && targetHeight == decoded.height) {
+                decoded
+            } else {
+                Bitmap.createScaledBitmap(decoded, targetWidth, targetHeight, true)
+            }
+
+        val outputBitmap =
+            if (scaled!!.hasAlpha()) {
+                Bitmap.createBitmap(scaled!!.width, scaled!!.height, Bitmap.Config.RGB_565).also { rgb ->
+                    val canvas = Canvas(rgb)
+                    canvas.drawColor(Color.WHITE)
+                    canvas.drawBitmap(scaled!!, 0f, 0f, null)
+                    rgbBitmap = rgb
+                }
+            } else {
+                scaled!!
+            }
+
+        FileOutputStream(targetFile).use { output ->
+            outputBitmap.compress(
+                Bitmap.CompressFormat.JPEG,
+                setting.jpegQuality.coerceIn(1, 100),
+                output,
+            )
+        }
+        true
+    } catch (_: Throwable) {
+        false
+    } finally {
+        rgbBitmap?.let {
+            if (it != scaled && !it.isRecycled) it.recycle()
+        }
+        scaled?.let {
+            if (it != decoded && !it.isRecycled) it.recycle()
+        }
+        if (!decoded.isRecycled) decoded.recycle()
     }
 }
 
