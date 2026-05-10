@@ -78,6 +78,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.mayegg.anisub.remotesync.RemoteSyncPage
 import com.mayegg.anisub.wordnote.WordNotePage
 
 class MainActivity : ComponentActivity() {
@@ -139,6 +140,7 @@ class MainActivity : ComponentActivity() {
 
                     AppPage.SeedDownload -> VideoDownloadEmbeddedPage()
                     AppPage.WordNote -> WordNotePage()
+                    AppPage.RemoteSync -> RemoteSyncPage()
                 }
 
                 FloatingActionButton(
@@ -190,6 +192,7 @@ private enum class AppPage(
     SubtitleMatch("字幕匹配"),
     SeedDownload("种子下载"),
     WordNote("单词摘记"),
+    RemoteSync("远程同步"),
 }
 
 data class VideoItem(
