@@ -142,7 +142,7 @@ class MainActivity : ComponentActivity() {
                             .align(Alignment.BottomEnd)
                             .padding(end = 18.dp, bottom = 22.dp),
                 ) {
-                    Text("页")
+                    Text("☰")
                 }
 
                 RightSidebar(

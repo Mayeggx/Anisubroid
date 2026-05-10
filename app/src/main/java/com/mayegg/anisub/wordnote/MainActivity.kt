@@ -331,6 +331,7 @@ private fun ActionsDropdown(
 ) {
     val selectedCount = state.drafts.count { it.selected }
     var expanded by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
 
     Box {
         TextButton(onClick = { expanded = true }) { Text("操作") }
@@ -339,8 +340,34 @@ private fun ActionsDropdown(
             DropdownMenuItem(text = { Text("全选") }, enabled = state.drafts.isNotEmpty(), onClick = { expanded = false; onSelectAll() })
             DropdownMenuItem(text = { Text("取消全选") }, enabled = selectedCount > 0, onClick = { expanded = false; onSelectNone() })
             DropdownMenuItem(text = { Text("批量制卡") }, enabled = selectedCount > 0 && !state.loading, onClick = { expanded = false; onProcessSelected() })
-            DropdownMenuItem(text = { Text("清空列表") }, enabled = state.drafts.isNotEmpty() && !state.loading, onClick = { expanded = false; onClearDrafts() })
+            DropdownMenuItem(
+                text = { Text("清空列表") },
+                enabled = state.drafts.isNotEmpty() && !state.loading,
+                onClick = {
+                    expanded = false
+                    showClearConfirm = true
+                },
+            )
         }
+    }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("确认清空列表") },
+            text = { Text("确定要清空当前列表吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearConfirm = false
+                        onClearDrafts()
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+            },
+        )
     }
 }
 
