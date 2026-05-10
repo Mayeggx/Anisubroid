@@ -15,6 +15,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -78,6 +80,7 @@ data class RemoteSyncConfig(
     val gitToken: String = "",
     val commitUserName: String = "Anisubroid Remote Sync",
     val commitUserEmail: String = "anisubroid@local",
+    val imageScalePercent: Int = DEFAULT_IMAGE_SCALE_PERCENT,
     val imageJpegQuality: Int = DEFAULT_IMAGE_JPEG_QUALITY,
 )
 
@@ -123,7 +126,7 @@ data class RemoteSyncUiState(
     val repoPath: String = "",
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun RemoteSyncPage(
     onOpenWordNoteForFolder: (String) -> Unit = {},
@@ -132,6 +135,7 @@ fun RemoteSyncPage(
     val viewModel: RemoteSyncViewModel = viewModel()
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
+    var scaleDraft by remember(state.config.imageScalePercent) { mutableStateOf(state.config.imageScalePercent.toString()) }
     var pendingName by rememberSaveable { mutableStateOf("") }
     var qualityDraft by remember(state.config.imageJpegQuality) { mutableStateOf(state.config.imageJpegQuality.toString()) }
     var showDeleteDialogFor by remember { mutableStateOf<SyncEntryUi?>(null) }
@@ -162,6 +166,7 @@ fun RemoteSyncPage(
                 actions = {
                     TextButton(
                         onClick = {
+                            scaleDraft = state.config.imageScalePercent.toString()
                             qualityDraft = state.config.imageJpegQuality.toString()
                             showImageQualityDialog = true
                         },
@@ -199,7 +204,7 @@ fun RemoteSyncPage(
                         Text("仓库 A: ${state.repoPath}", style = MaterialTheme.typography.bodySmall)
                         Text("当前设备: ${state.deviceName} (${state.deviceId})", style = MaterialTheme.typography.bodySmall)
                         Text(
-                            "图片压缩: 缩放 ${DEFAULT_IMAGE_SCALE_PERCENT}% + JPEG 质量 ${state.config.imageJpegQuality}",
+                            "图片压缩: 缩放 ${state.config.imageScalePercent}% + JPEG 质量 ${state.config.imageJpegQuality}",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -239,7 +244,11 @@ fun RemoteSyncPage(
                             "当前文件夹文件数量: ${entry.folderFileCount?.toString() ?: "-"}",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             if (canPush) {
                                 Button(
                                     onClick = { viewModel.push(entry.id) },
@@ -398,7 +407,14 @@ fun RemoteSyncPage(
             title = { Text("图片质量") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Push 前会把图片缩放到 50%，并转为 JPG。")
+                    Text("Push 前会把图片缩放并转为 JPG。")
+                    OutlinedTextField(
+                        value = scaleDraft,
+                        onValueChange = { scaleDraft = it.filter { ch -> ch.isDigit() }.take(3) },
+                        label = { Text("缩放比 (1-100)%") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
                     OutlinedTextField(
                         value = qualityDraft,
                         onValueChange = { qualityDraft = it.filter { ch -> ch.isDigit() }.take(3) },
@@ -411,8 +427,9 @@ fun RemoteSyncPage(
             confirmButton = {
                 TextButton(
                     onClick = {
+                        val scale = scaleDraft.toIntOrNull()?.coerceIn(1, 100) ?: DEFAULT_IMAGE_SCALE_PERCENT
                         val quality = qualityDraft.toIntOrNull()?.coerceIn(1, 100) ?: DEFAULT_IMAGE_JPEG_QUALITY
-                        viewModel.updateImageQuality(quality)
+                        viewModel.updateImageCompression(scalePercent = scale, jpegQuality = quality)
                         showImageQualityDialog = false
                     },
                 ) { Text("保存") }
@@ -448,7 +465,7 @@ class RemoteSyncViewModel(
     }
 
     fun saveConfig(config: RemoteSyncConfig) {
-        val normalized = config.copy(imageJpegQuality = config.imageJpegQuality.coerceIn(1, 100))
+        val normalized = normalizeConfig(config)
         store.saveConfig(normalized)
         _uiState.update {
             it.copy(
@@ -458,9 +475,17 @@ class RemoteSyncViewModel(
         }
     }
 
-    fun updateImageQuality(quality: Int) {
+    fun updateImageCompression(
+        scalePercent: Int,
+        jpegQuality: Int,
+    ) {
         val current = store.loadConfig()
-        saveConfig(current.copy(imageJpegQuality = quality.coerceIn(1, 100)))
+        saveConfig(
+            current.copy(
+                imageScalePercent = scalePercent.coerceIn(1, 100),
+                imageJpegQuality = jpegQuality.coerceIn(1, 100),
+            ),
+        )
     }
 
     fun refreshEntries() {
@@ -603,6 +628,12 @@ class RemoteSyncViewModel(
         }
         return entry
     }
+
+    private fun normalizeConfig(config: RemoteSyncConfig): RemoteSyncConfig =
+        config.copy(
+            imageScalePercent = config.imageScalePercent.coerceIn(1, 100),
+            imageJpegQuality = config.imageJpegQuality.coerceIn(1, 100),
+        )
 }
 
 private class RemoteSyncStore(
@@ -621,6 +652,7 @@ private class RemoteSyncStore(
                 gitToken = json.optString("gitToken", ""),
                 commitUserName = json.optString("commitUserName", "Anisubroid Remote Sync"),
                 commitUserEmail = json.optString("commitUserEmail", "anisubroid@local"),
+                imageScalePercent = json.optInt("imageScalePercent", DEFAULT_IMAGE_SCALE_PERCENT),
                 imageJpegQuality = json.optInt("imageJpegQuality", DEFAULT_IMAGE_JPEG_QUALITY),
             )
         }.getOrDefault(RemoteSyncConfig())
@@ -634,6 +666,7 @@ private class RemoteSyncStore(
                 .put("gitToken", config.gitToken)
                 .put("commitUserName", config.commitUserName)
                 .put("commitUserEmail", config.commitUserEmail)
+                .put("imageScalePercent", config.imageScalePercent.coerceIn(1, 100))
                 .put("imageJpegQuality", config.imageJpegQuality.coerceIn(1, 100))
         prefs.edit().putString("config", json.toString()).apply()
     }
@@ -704,9 +737,6 @@ private class RemoteSyncGitService(
         try {
             safePull(git, config)
             val targetDir = File(repoDir, entry.repoPath)
-            if (targetDir.exists()) {
-                targetDir.deleteRecursively()
-            }
             val stats =
                 copyFolderTree(
                     context = context,
@@ -715,7 +745,7 @@ private class RemoteSyncGitService(
                     destinationDir = targetDir,
                     setting =
                         ImageCompressionSetting(
-                            scalePercent = DEFAULT_IMAGE_SCALE_PERCENT,
+                            scalePercent = config.imageScalePercent.coerceIn(1, 100),
                             jpegQuality = config.imageJpegQuality.coerceIn(1, 100),
                         ),
                 )
