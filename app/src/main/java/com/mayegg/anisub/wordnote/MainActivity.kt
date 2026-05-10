@@ -98,7 +98,6 @@ class MainActivity : ComponentActivity() {
                 var showSettings by remember { mutableStateOf(false) }
                 var showStatus by remember { mutableStateOf(false) }
                 var showLogs by remember { mutableStateOf(false) }
-                var showAbout by remember { mutableStateOf(false) }
                 var previewUri by remember { mutableStateOf<Uri?>(null) }
 
                 val permissionLauncher =
@@ -127,7 +126,6 @@ class MainActivity : ComponentActivity() {
                     onOpenSettings = { showSettings = true },
                     onOpenStatus = { showStatus = true },
                     onOpenLogs = { showLogs = true },
-                    onOpenAbout = { showAbout = true },
                     onPickFolder = { folderLauncher.launch(null) },
                     onPromptModeChange = viewModel::updatePromptMode,
                     onSelectAll = viewModel::selectAll,
@@ -170,10 +168,6 @@ class MainActivity : ComponentActivity() {
                         onDismiss = { showLogs = false },
                         onClear = AppLogger::clear,
                     )
-                }
-
-                if (showAbout) {
-                    AboutDialog(onDismiss = { showAbout = false })
                 }
 
                 previewUri?.let { uri ->
@@ -236,7 +230,6 @@ private fun MainScreen(
     onOpenSettings: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenLogs: () -> Unit,
-    onOpenAbout: () -> Unit,
     onPickFolder: () -> Unit,
     onPromptModeChange: (String) -> Unit,
     onSelectAll: () -> Unit,
@@ -277,7 +270,6 @@ private fun MainScreen(
                         onOpenStatus = onOpenStatus,
                         onOpenLogs = onOpenLogs,
                         onOpenSettings = onOpenSettings,
-                        onOpenAbout = onOpenAbout,
                     )
                 },
             )
@@ -357,7 +349,6 @@ private fun MoreDropdown(
     onOpenStatus: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenAbout: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -367,7 +358,6 @@ private fun MoreDropdown(
             DropdownMenuItem(text = { Text("状态") }, onClick = { expanded = false; onOpenStatus() })
             DropdownMenuItem(text = { Text("日志") }, onClick = { expanded = false; onOpenLogs() })
             DropdownMenuItem(text = { Text("设置") }, onClick = { expanded = false; onOpenSettings() })
-            DropdownMenuItem(text = { Text("关于") }, onClick = { expanded = false; onOpenAbout() })
         }
     }
 }
@@ -1157,7 +1147,6 @@ fun WordNotePage() {
         var showSettings by remember { mutableStateOf(false) }
         var showStatus by remember { mutableStateOf(false) }
         var showLogs by remember { mutableStateOf(false) }
-        var showAbout by remember { mutableStateOf(false) }
         var previewUri by remember { mutableStateOf<Uri?>(null) }
 
         val permissionLauncher =
@@ -1186,7 +1175,6 @@ fun WordNotePage() {
             onOpenSettings = { showSettings = true },
             onOpenStatus = { showStatus = true },
             onOpenLogs = { showLogs = true },
-            onOpenAbout = { showAbout = true },
             onPickFolder = { folderLauncher.launch(null) },
             onPromptModeChange = viewModel::updatePromptMode,
             onSelectAll = viewModel::selectAll,
@@ -1229,10 +1217,6 @@ fun WordNotePage() {
                 onDismiss = { showLogs = false },
                 onClear = AppLogger::clear,
             )
-        }
-
-        if (showAbout) {
-            AboutDialog(onDismiss = { showAbout = false })
         }
 
         previewUri?.let { uri ->

@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -37,6 +39,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -90,6 +93,7 @@ class MainActivity : ComponentActivity() {
             var folderPickMode by remember { mutableStateOf(FolderPickMode.OpenAndLoad) }
             var currentPage by rememberSaveable { mutableStateOf(AppPage.SubtitleMatch) }
             var sidebarVisible by rememberSaveable { mutableStateOf(false) }
+            var aboutVisible by rememberSaveable { mutableStateOf(false) }
 
             val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
@@ -127,31 +131,38 @@ class MainActivity : ComponentActivity() {
                             onDismissCandidates = vm::dismissCandidates,
                         )
 
-                    AppPage.SeedDownload -> VideoDownloadPage()
+                    AppPage.SeedDownload -> VideoDownloadEmbeddedPage()
                     AppPage.WordNote -> WordNotePage()
                 }
 
-                TextButton(
+                FloatingActionButton(
                     onClick = { sidebarVisible = true },
                     modifier =
                         Modifier
-                            .align(Alignment.TopEnd)
-                            .statusBarsPadding()
-                            .padding(top = 6.dp, end = 8.dp),
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 18.dp, bottom = 22.dp),
                 ) {
-                    Text("页面")
+                    Text("页")
                 }
 
                 RightSidebar(
                     visible = sidebarVisible,
                     currentPage = currentPage,
                     pages = AppPage.entries.toList(),
+                    onOpenAbout = {
+                        sidebarVisible = false
+                        aboutVisible = true
+                    },
                     onDismiss = { sidebarVisible = false },
                     onSelectPage = {
                         currentPage = it
                         sidebarVisible = false
                     },
                 )
+            }
+
+            if (aboutVisible) {
+                AppAboutDialog(onDismiss = { aboutVisible = false })
             }
         }
     }
@@ -235,6 +246,7 @@ private fun RightSidebar(
     visible: Boolean,
     currentPage: AppPage,
     pages: List<AppPage>,
+    onOpenAbout: () -> Unit,
     onDismiss: () -> Unit,
     onSelectPage: (AppPage) -> Unit,
 ) {
@@ -276,12 +288,65 @@ private fun RightSidebar(
                         Text(page.label)
                     }
                 }
+                TextButton(onClick = onOpenAbout, modifier = Modifier.fillMaxWidth()) {
+                    Text("关于")
+                }
                 TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
                     Text("关闭")
                 }
             }
         }
     }
+}
+
+@Composable
+private fun AppAboutDialog(
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val releaseUrl = "https://github.com/Mayeggx/Anisubroid/releases"
+    val packageInfo =
+        remember {
+            try {
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            } catch (_: PackageManager.NameNotFoundException) {
+                null
+            }
+        }
+    val versionName = packageInfo?.versionName ?: "未知"
+    val versionCode = packageInfo?.longVersionCode?.toString() ?: "未知"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("关于") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Anisubroid", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("作者: mayegg")
+                Text("版本: $versionName ($versionCode)")
+                Text("更新地址:")
+                SelectionContainer {
+                    Text(releaseUrl, style = MaterialTheme.typography.bodySmall)
+                }
+                TextButton(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(releaseUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                    },
+                ) {
+                    Text("打开更新地址")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
 }
 
 class MainViewModel(

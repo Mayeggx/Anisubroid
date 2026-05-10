@@ -106,6 +106,26 @@ fun VideoDownloadPage() {
     )
 }
 
+@Composable
+fun VideoDownloadEmbeddedPage() {
+    val vm: VideoDownloadViewModel = viewModel()
+    val state by vm.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    VideoDownloadScreenEmbedded(
+        state = state,
+        onAddSubscription = vm::addSubscription,
+        onRemoveSubscription = vm::removeSubscription,
+        onOpenSubscription = vm::openSubscription,
+        onBackToList = vm::backToList,
+        onRefreshEntries = vm::refreshActiveSubscription,
+        onDownloadTorrent = vm::downloadTorrent,
+        onOpenTorrent = { path ->
+            val message = openTorrentFile(context, path)
+            if (message != null) vm.setMessage(message)
+        },
+    )
+}
+
 data class VideoSubscriptionItem(
     val id: String,
     val label: String,
@@ -123,6 +143,88 @@ data class TorrentEntryItem(
     val localFilePath: String? = null,
     val downloading: Boolean = false,
 )
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoDownloadScreenEmbedded(
+    state: VideoDownloadUiState,
+    onAddSubscription: (String) -> Unit,
+    onRemoveSubscription: (String) -> Unit,
+    onOpenSubscription: (String) -> Unit,
+    onBackToList: () -> Unit,
+    onRefreshEntries: () -> Unit,
+    onDownloadTorrent: (String) -> Unit,
+    onOpenTorrent: (String) -> Unit,
+) {
+    var addDialogVisible by remember { mutableStateOf(false) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(if (state.activeSubscriptionId == null) "" else state.activeSubscriptionLabel) },
+                navigationIcon = {
+                    if (state.activeSubscriptionId != null) {
+                        TextButton(onClick = onBackToList) { Text("返回") }
+                    }
+                },
+                actions = {
+                    if (state.activeSubscriptionId == null) {
+                        TextButton(onClick = { addDialogVisible = true }) { Text("添加") }
+                    } else {
+                        TextButton(onClick = onRefreshEntries) { Text("刷新") }
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = state.message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (state.activeSubscriptionId == null) {
+                SubscriptionList(
+                    subscriptions = state.subscriptions,
+                    onOpenSubscription = onOpenSubscription,
+                    onRemoveSubscription = onRemoveSubscription,
+                )
+            } else {
+                if (state.loadingEntries) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+                TorrentEntryList(
+                    entries = state.activeEntries,
+                    onDownloadTorrent = onDownloadTorrent,
+                    onOpenTorrent = onOpenTorrent,
+                )
+            }
+        }
+    }
+
+    if (addDialogVisible) {
+        AddSubscriptionDialog(
+            onDismiss = { addDialogVisible = false },
+            onConfirm = { url ->
+                onAddSubscription(url)
+                addDialogVisible = false
+            },
+        )
+    }
+}
 
 data class VideoDownloadUiState(
     val subscriptions: List<VideoSubscriptionItem> = emptyList(),
