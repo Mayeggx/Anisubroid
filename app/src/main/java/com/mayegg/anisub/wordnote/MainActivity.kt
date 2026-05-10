@@ -73,6 +73,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mayegg.anisub.wordnote.ui.PstankidroidTheme
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1278,6 +1279,7 @@ private fun persistUriForWordNote(
     context: android.content.Context,
     uri: Uri,
 ) {
+    if (uri.scheme != "content") return
     try {
         context.contentResolver.takePersistableUriPermission(
             uri,
@@ -1290,12 +1292,24 @@ private fun persistUriForWordNote(
 private fun resolveFolderLabelForWordNote(
     context: android.content.Context,
     uri: Uri,
-): String = DocumentFile.fromTreeUri(context, uri)?.name ?: uri.lastPathSegment ?: uri.toString()
+): String {
+    if (uri.scheme == "file") {
+        return File(uri.path.orEmpty()).name.ifBlank { uri.lastPathSegment ?: uri.toString() }
+    }
+    return DocumentFile.fromTreeUri(context, uri)?.name ?: uri.lastPathSegment ?: uri.toString()
+}
 
 private fun collectImageUrisFromTreeForWordNote(
     context: android.content.Context,
     treeUri: Uri,
 ): List<Uri> {
+    if (treeUri.scheme == "file") {
+        val root = File(treeUri.path.orEmpty())
+        if (!root.exists() || !root.isDirectory) return emptyList()
+        return collectImageFilesForWordNote(root)
+            .sortedBy { it.name.lowercase(Locale.ROOT) }
+            .map { Uri.fromFile(it) }
+    }
     val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
     return collectImageFilesForWordNote(root)
         .sortedBy { it.name.orEmpty().lowercase(Locale.ROOT) }
@@ -1311,14 +1325,32 @@ private fun collectImageFilesForWordNote(directory: DocumentFile): List<Document
         }
     }
 
+private fun collectImageFilesForWordNote(directory: File): List<File> =
+    directory.listFiles().orEmpty().flatMap { file ->
+        when {
+            file.isDirectory -> collectImageFilesForWordNote(file)
+            file.isFile && isImageByNameForWordNote(file.name) -> listOf(file)
+            else -> emptyList()
+        }
+    }
+
 private fun clearCurrentFolderImagesForWordNote(
     context: android.content.Context,
     folderUri: String?,
 ): String {
     if (folderUri.isNullOrBlank()) return "未选择文件夹，已仅清空列表。"
-    val root = DocumentFile.fromTreeUri(context, Uri.parse(folderUri)) ?: return "无法访问当前文件夹，已仅清空列表。"
-    val files = collectImageFilesForWordNote(root)
+    val uri = Uri.parse(folderUri)
     var deletedCount = 0
+    if (uri.scheme == "file") {
+        val root = File(uri.path.orEmpty())
+        if (!root.exists() || !root.isDirectory) return "无法访问当前文件夹，已仅清空列表。"
+        collectImageFilesForWordNote(root).forEach { file ->
+            if (file.delete()) deletedCount += 1
+        }
+        return "已清空列表，并删除当前文件夹中 $deletedCount 张图片。"
+    }
+    val root = DocumentFile.fromTreeUri(context, uri) ?: return "无法访问当前文件夹，已仅清空列表。"
+    val files = collectImageFilesForWordNote(root)
     files.forEach { file ->
         if (file.delete()) deletedCount += 1
     }

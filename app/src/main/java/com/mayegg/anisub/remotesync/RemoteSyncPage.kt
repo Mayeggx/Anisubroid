@@ -21,14 +21,19 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -41,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -52,6 +58,8 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
@@ -62,7 +70,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.errors.TransportException
+import org.eclipse.jgit.transport.PushResult
 import org.eclipse.jgit.transport.RefSpec
+import org.eclipse.jgit.transport.RemoteRefUpdate
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
 import org.json.JSONArray
 import org.json.JSONObject
@@ -124,6 +134,8 @@ data class RemoteSyncUiState(
     val deviceId: String = "",
     val deviceName: String = "",
     val repoPath: String = "",
+    val headSummary: String = "未读取",
+    val gitLogs: List<String> = emptyList(),
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -143,6 +155,7 @@ fun RemoteSyncPage(
     var showGitConfigDialog by remember { mutableStateOf(false) }
     var showCreateEntryDialog by remember { mutableStateOf(false) }
     var showImageQualityDialog by remember { mutableStateOf(false) }
+    var showGitLogDialog by remember { mutableStateOf(false) }
     var configDraft by remember(state.config) { mutableStateOf(state.config) }
 
     val folderLauncher =
@@ -162,7 +175,7 @@ fun RemoteSyncPage(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("远程同步") },
+                title = {},
                 actions = {
                     TextButton(
                         onClick = {
@@ -183,6 +196,10 @@ fun RemoteSyncPage(
                         onClick = { showCreateEntryDialog = true },
                         enabled = !state.loading,
                     ) { Text("新建条目") }
+                    TextButton(
+                        onClick = { showGitLogDialog = true },
+                        enabled = !state.loading || state.gitLogs.isNotEmpty(),
+                    ) { Text("日志") }
                 },
             )
         },
@@ -207,6 +224,7 @@ fun RemoteSyncPage(
                             "图片压缩: 缩放 ${state.config.imageScalePercent}% + JPEG 质量 ${state.config.imageJpegQuality}",
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        Text("当前HEAD: ${state.headSummary}", style = MaterialTheme.typography.bodySmall)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = viewModel::pull, enabled = !state.loading) { Text("Pull") }
                             Button(onClick = viewModel::refreshEntries, enabled = !state.loading) { Text("刷新列表") }
@@ -230,13 +248,30 @@ fun RemoteSyncPage(
 
             items(state.entries, key = { it.id }) { entry ->
                 val canPush = shouldShowPushButton(entry, state.deviceId)
-                val hasLocalFolder = !entry.folderUri.isNullOrBlank()
+                val noteFolderUri = resolveWordNoteFolderUri(entry = entry, repoRootPath = state.repoPath)
                 Card {
                     Column(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(entry.displayName, style = MaterialTheme.typography.titleMedium)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Text(
+                                text = entry.displayName,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilledTonalIconButton(
+                                onClick = { showDeleteDialogFor = entry },
+                                enabled = !state.loading,
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Text("×")
+                            }
+                        }
                         Text("设备: ${entry.deviceName} (${entry.deviceId})", style = MaterialTheme.typography.bodySmall)
                         Text("仓库路径: ${entry.repoPath}", style = MaterialTheme.typography.bodySmall)
                         Text("本地绑定: ${entry.folderLabel ?: "无"}", style = MaterialTheme.typography.bodySmall)
@@ -259,16 +294,12 @@ fun RemoteSyncPage(
                                 onClick = { showClearDialogFor = entry },
                                 enabled = !state.loading,
                             ) { Text("清空") }
-                            if (hasLocalFolder) {
+                            if (!noteFolderUri.isNullOrBlank()) {
                                 Button(
-                                    onClick = { onOpenWordNoteForFolder(entry.folderUri.orEmpty()) },
+                                    onClick = { onOpenWordNoteForFolder(noteFolderUri) },
                                     enabled = !state.loading,
                                 ) { Text("摘记") }
                             }
-                            Button(
-                                onClick = { showDeleteDialogFor = entry },
-                                enabled = !state.loading,
-                            ) { Text("删除") }
                         }
                     }
                 }
@@ -439,6 +470,40 @@ fun RemoteSyncPage(
             },
         )
     }
+
+    if (showGitLogDialog) {
+        AlertDialog(
+            onDismissRequest = { showGitLogDialog = false },
+            title = { Text("Git 日志") },
+            text = {
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (state.gitLogs.isEmpty()) {
+                        Text("暂无日志记录。", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        state.gitLogs.asReversed().forEach { line ->
+                            Text(line, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showGitLogDialog = false }) { Text("关闭") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { viewModel.clearGitLogs() },
+                    enabled = state.gitLogs.isNotEmpty(),
+                ) { Text("清空日志") }
+            },
+        )
+    }
 }
 
 class RemoteSyncViewModel(
@@ -462,6 +527,10 @@ class RemoteSyncViewModel(
 
     init {
         refreshEntries()
+    }
+
+    fun clearGitLogs() {
+        _uiState.update { it.copy(gitLogs = emptyList()) }
     }
 
     fun saveConfig(config: RemoteSyncConfig) {
@@ -489,9 +558,13 @@ class RemoteSyncViewModel(
     }
 
     fun refreshEntries() {
-        runTask {
+        runTask(
+            operationName = "刷新",
+        ) {
+            val config = store.loadConfig()
             refreshEntryListInternal()
-            "已刷新条目列表。"
+            val headSummary = appendHeadSummary(config)
+            "已刷新条目列表。$headSummary"
         }
     }
 
@@ -525,30 +598,40 @@ class RemoteSyncViewModel(
     }
 
     fun pull() {
-        runTask {
+        runTask(
+            operationName = "Pull",
+        ) {
             val config = store.loadConfig()
-            gitService.pull(config)
+            gitService.pull(config, logger = ::appendGitLog)
             refreshEntryListInternal()
-            "Pull 完成。"
+            val headSummary = appendHeadSummary(config)
+            "Pull 完成。$headSummary"
         }
     }
 
     fun push(entryId: String) {
-        runTask {
+        runTask(
+            operationName = "Push",
+        ) {
             val config = store.loadConfig()
             val entry = requirePushableBinding(entryId)
-            val stats = gitService.pushEntry(config = config, entry = entry)
+            appendGitLog("Push 条目: ${entry.displayName} (${entry.repoPath})")
+            val stats = gitService.pushEntry(config = config, entry = entry, logger = ::appendGitLog)
             refreshEntryListInternal()
-            "Push 完成：${entry.displayName}，复制 ${stats.copiedFiles} 个文件，压缩 ${stats.compressedImages} 张图片，跳过重名 ${stats.skippedFiles} 个文件。"
+            val headSummary = appendHeadSummary(config)
+            "Push 完成：${entry.displayName}，复制 ${stats.copiedFiles} 个文件，压缩 ${stats.compressedImages} 张图片，跳过重名 ${stats.skippedFiles} 个文件。$headSummary"
         }
     }
 
     fun clear(entryId: String) {
-        runTask {
+        runTask(
+            operationName = "清空",
+        ) {
             val config = store.loadConfig()
             val localBindings = store.loadBindings()
             val knownEntries = mergeEntries(localBindings, gitService.scanRemoteEntries(), emptyMap())
             val entry = knownEntries.firstOrNull { it.id == entryId } ?: throw IllegalStateException("条目不存在。")
+            appendGitLog("清空条目: ${entry.displayName} (${entry.repoPath})")
             val localBinding = localBindings.firstOrNull { it.id == entryId }
             val deletedFiles =
                 localBinding
@@ -566,6 +649,7 @@ class RemoteSyncViewModel(
                         repoPath = entry.repoPath,
                         updatedAt = entry.updatedAt,
                     ),
+                logger = ::appendGitLog,
             )
             refreshEntryListInternal()
             val localMessage =
@@ -579,12 +663,15 @@ class RemoteSyncViewModel(
     }
 
     fun delete(entryId: String) {
-        runTask {
+        runTask(
+            operationName = "删除",
+        ) {
             val config = store.loadConfig()
             val localBindings = store.loadBindings()
             val knownEntries = mergeEntries(localBindings, gitService.scanRemoteEntries(), emptyMap())
             val entry = knownEntries.firstOrNull { it.id == entryId } ?: throw IllegalStateException("条目不存在。")
-            gitService.deleteEntry(config, entry.repoPath)
+            appendGitLog("删除条目: ${entry.displayName} (${entry.repoPath})")
+            gitService.deleteEntry(config, entry.repoPath, logger = ::appendGitLog)
             store.saveBindings(localBindings.filterNot { it.id == entryId })
             refreshEntryListInternal()
             "删除完成：${entry.displayName}"
@@ -592,19 +679,28 @@ class RemoteSyncViewModel(
     }
 
     private fun runTask(
+        operationName: String? = null,
         fallbackMessage: String? = null,
         task: suspend () -> String,
     ) {
         _uiState.update { it.copy(loading = true) }
+        operationName?.let { appendGitLog("$it: 开始") }
         viewModelScope.launch(Dispatchers.IO) {
             val message =
                 runCatching { task() }
-                    .getOrElse { "失败：${it.message ?: "未知错误"}" }
+                    .getOrElse {
+                        val errorMessage = "失败：${it.message ?: "未知错误"}"
+                        operationName?.let { op -> appendGitLog("$op: $errorMessage") }
+                        errorMessage
+                    }
             _uiState.update {
                 it.copy(
                     loading = false,
                     statusMessage = if (message.isBlank()) fallbackMessage ?: it.statusMessage else message,
                 )
+            }
+            if (!message.startsWith("失败：")) {
+                operationName?.let { appendGitLog("$it: 完成") }
             }
         }
     }
@@ -612,10 +708,15 @@ class RemoteSyncViewModel(
     private fun refreshEntryListInternal() {
         val localBindings = store.loadBindings()
         val remoteEntries = runCatching { gitService.scanRemoteEntries() }.getOrDefault(emptyList())
-        val folderFileCounts =
-            localBindings.associate { binding ->
-                binding.id to countFilesInFolderTree(appContext, binding.folderUri)
+        val folderFileCounts = mutableMapOf<String, Int?>()
+        localBindings.forEach { binding ->
+            folderFileCounts[binding.id] = countFilesInFolderTree(appContext, binding.folderUri)
+        }
+        remoteEntries.forEach { remote ->
+            if (folderFileCounts[remote.id] == null) {
+                folderFileCounts[remote.id] = countFilesInRepoEntryDirectory(gitService.repoDir, remote.repoPath)
             }
+        }
         val merged = mergeEntries(localBindings, remoteEntries, folderFileCounts)
         _uiState.update { it.copy(entries = merged, config = store.loadConfig()) }
     }
@@ -634,6 +735,20 @@ class RemoteSyncViewModel(
             imageScalePercent = config.imageScalePercent.coerceIn(1, 100),
             imageJpegQuality = config.imageJpegQuality.coerceIn(1, 100),
         )
+
+    private fun appendHeadSummary(config: RemoteSyncConfig): String {
+        val headSummary = gitService.readHeadSummary(config, logger = ::appendGitLog)
+        appendGitLog("当前HEAD: $headSummary")
+        _uiState.update { it.copy(headSummary = headSummary) }
+        return "当前HEAD: $headSummary"
+    }
+
+    private fun appendGitLog(message: String) {
+        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+        _uiState.update { state ->
+            state.copy(gitLogs = (state.gitLogs + "[$timestamp] $message").takeLast(300))
+        }
+    }
 }
 
 private class RemoteSyncStore(
@@ -720,10 +835,31 @@ private class RemoteSyncGitService(
 ) {
     val repoDir: File = File(context.filesDir, "remote-sync/repo-a")
 
-    fun pull(config: RemoteSyncConfig) {
-        val git = openOrCreateRepository(config)
+    fun pull(
+        config: RemoteSyncConfig,
+        logger: (String) -> Unit = {},
+    ) {
+        val git = openOrCreateRepository(config, logger)
         try {
-            safePull(git, config)
+            safePull(git, config, logger)
+        } finally {
+            git.close()
+        }
+    }
+
+    fun readHeadSummary(
+        config: RemoteSyncConfig,
+        logger: (String) -> Unit = {},
+    ): String {
+        val git = openOrCreateRepository(config, logger = {})
+        try {
+            val headCommit = git.log().setMaxCount(1).call().firstOrNull()
+            if (headCommit == null) {
+                return "空仓库（暂无提交）"
+            }
+            val summary = "${headCommit.name.take(8)} ${headCommit.shortMessage}"
+            logger("读取 HEAD: $summary")
+            return summary
         } finally {
             git.close()
         }
@@ -732,11 +868,13 @@ private class RemoteSyncGitService(
     fun pushEntry(
         config: RemoteSyncConfig,
         entry: EntryBinding,
+        logger: (String) -> Unit = {},
     ): CopyStats {
-        val git = openOrCreateRepository(config)
+        val git = openOrCreateRepository(config, logger)
         try {
-            safePull(git, config)
+            safePull(git, config, logger)
             val targetDir = File(repoDir, entry.repoPath)
+            logger("复制目录: ${entry.folderUri} -> ${targetDir.absolutePath}")
             val stats =
                 copyFolderTree(
                     context = context,
@@ -749,6 +887,7 @@ private class RemoteSyncGitService(
                             jpegQuality = config.imageJpegQuality.coerceIn(1, 100),
                         ),
                 )
+            logger("复制完成: copied=${stats.copiedFiles}, compressed=${stats.compressedImages}, skipped=${stats.skippedFiles}")
             writeEntryMetadata(
                 targetDir = targetDir,
                 entry =
@@ -761,11 +900,13 @@ private class RemoteSyncGitService(
                         updatedAt = System.currentTimeMillis(),
                     ),
             )
+            logger("写入元数据: ${entry.repoPath}/$ENTRY_META_FILE")
             commitAndPushIfNeeded(
                 git = git,
                 config = config,
                 message = "sync: push ${entry.displayName} (${entry.deviceName})",
                 paths = listOf(entry.repoPath),
+                logger = logger,
             )
             return stats
         } finally {
@@ -776,12 +917,14 @@ private class RemoteSyncGitService(
     fun clearEntry(
         config: RemoteSyncConfig,
         entry: RepoEntryMeta,
+        logger: (String) -> Unit = {},
     ) {
-        val git = openOrCreateRepository(config)
+        val git = openOrCreateRepository(config, logger)
         try {
-            safePull(git, config)
+            safePull(git, config, logger)
             val targetDir = File(repoDir, entry.repoPath)
             clearDirectoryContents(targetDir)
+            logger("已清空仓库目录: ${targetDir.absolutePath}")
             writeEntryMetadata(
                 targetDir = targetDir,
                 entry =
@@ -794,11 +937,13 @@ private class RemoteSyncGitService(
                         updatedAt = System.currentTimeMillis(),
                     ),
             )
+            logger("重写元数据: ${entry.repoPath}/$ENTRY_META_FILE")
             commitAndPushIfNeeded(
                 git = git,
                 config = config,
                 message = "sync: clear ${entry.displayName} (${entry.deviceName})",
                 paths = listOf(entry.repoPath),
+                logger = logger,
             )
         } finally {
             git.close()
@@ -808,19 +953,22 @@ private class RemoteSyncGitService(
     fun deleteEntry(
         config: RemoteSyncConfig,
         repoPath: String,
+        logger: (String) -> Unit = {},
     ) {
-        val git = openOrCreateRepository(config)
+        val git = openOrCreateRepository(config, logger)
         try {
-            safePull(git, config)
+            safePull(git, config, logger)
             val targetDir = File(repoDir, repoPath)
             if (targetDir.exists()) {
                 targetDir.deleteRecursively()
+                logger("已删除仓库目录: ${targetDir.absolutePath}")
             }
             commitAndPushIfNeeded(
                 git = git,
                 config = config,
                 message = "sync: delete $repoPath",
                 paths = listOf(repoPath),
+                logger = logger,
             )
         } finally {
             git.close()
@@ -848,35 +996,42 @@ private class RemoteSyncGitService(
             }.toList()
     }
 
-    private fun openOrCreateRepository(config: RemoteSyncConfig): Git {
+    private fun openOrCreateRepository(
+        config: RemoteSyncConfig,
+        logger: (String) -> Unit,
+    ): Git {
         repoDir.mkdirs()
         val dotGit = File(repoDir, ".git")
         if (dotGit.exists()) {
             val git = Git.open(repoDir)
             configureRepository(git, config)
+            logger("打开本地仓库: ${repoDir.absolutePath}")
             return git
         }
 
-        if (repoDir.listFiles().isNullOrEmpty()) {
-            runCatching {
-                val cloned =
-                    Git.cloneRepository()
-                        .setURI(config.remoteUrl)
-                        .setDirectory(repoDir)
-                        .setCredentialsProvider(credentials(config))
-                        .call()
-                configureRepository(cloned, config)
-                return cloned
-            }
+        // 仓库目录异常（有文件但无 .git）时，重建目录并重新克隆，避免进入“本地孤岛仓库”。
+        if (!repoDir.listFiles().isNullOrEmpty()) {
+            logger("检测到仓库目录缺少 .git，正在重建并重新克隆。")
+            repoDir.deleteRecursively()
+            repoDir.mkdirs()
         }
 
-        val git =
-            Git.init()
-                .setDirectory(repoDir)
-                .setInitialBranch(DEFAULT_BRANCH)
-                .call()
-        configureRepository(git, config)
-        return git
+        return try {
+            val cloned =
+                Git.cloneRepository()
+                    .setURI(config.remoteUrl)
+                    .setDirectory(repoDir)
+                    .setCredentialsProvider(credentials(config))
+                    .call()
+            configureRepository(cloned, config)
+            logger("克隆远端仓库: ${config.remoteUrl}")
+            cloned
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "无法克隆远端仓库，请检查 URL/账号权限/网络后重试。${error.message ?: ""}",
+                error,
+            )
+        }
     }
 
     private fun configureRepository(
@@ -885,6 +1040,7 @@ private class RemoteSyncGitService(
     ) {
         val repoConfig = git.repository.config
         repoConfig.setString("remote", "origin", "url", config.remoteUrl)
+        repoConfig.setStringList("remote", "origin", "fetch", listOf("+refs/heads/*:refs/remotes/origin/*"))
         repoConfig.setString("branch", DEFAULT_BRANCH, "remote", "origin")
         repoConfig.setString("branch", DEFAULT_BRANCH, "merge", "refs/heads/$DEFAULT_BRANCH")
         repoConfig.setString("user", null, "name", config.commitUserName.ifBlank { "Anisubroid Remote Sync" })
@@ -895,15 +1051,59 @@ private class RemoteSyncGitService(
     private fun safePull(
         git: Git,
         config: RemoteSyncConfig,
+        logger: (String) -> Unit,
     ) {
-        runCatching {
-            git.pull()
-                .setRemote("origin")
-                .setRemoteBranchName(DEFAULT_BRANCH)
-                .setRebase(true)
-                .setCredentialsProvider(credentials(config))
-                .call()
+        logger("执行 pull: origin/$DEFAULT_BRANCH")
+        val pullResult =
+            runCatching {
+                git.pull()
+                    .setRemote("origin")
+                    .setRemoteBranchName(DEFAULT_BRANCH)
+                    .setRebase(true)
+                    .setCredentialsProvider(credentials(config))
+                    .call()
+            }.getOrElse { error ->
+                val message = error.message.orEmpty()
+                if (!message.contains("unrelated", ignoreCase = true)) {
+                    throw error
+                }
+                logger("检测到无共同历史，尝试强制对齐本地分支到远端。")
+                git.fetch()
+                    .setRemote("origin")
+                    .setCredentialsProvider(credentials(config))
+                    .setRefSpecs(RefSpec("+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"))
+                    .call()
+                val remoteMainRef = git.repository.findRef("refs/remotes/origin/$DEFAULT_BRANCH")
+                    ?: throw IllegalStateException("远端缺少 $DEFAULT_BRANCH 分支，无法对齐本地分支。")
+                git.reset()
+                    .setMode(org.eclipse.jgit.api.ResetCommand.ResetType.HARD)
+                    .setRef(remoteMainRef.name)
+                    .call()
+                logger("本地分支已强制对齐到 ${remoteMainRef.name}")
+                return
+            }
+        if (pullResult.isSuccessful) {
+            logger("pull 完成。")
+            return
         }
+        logger("pull 未成功，准备 fetch 检查远端分支。")
+
+        // 远端尚未创建目标分支时，允许继续后续 push 创建分支。
+        val fetchResult =
+            git.fetch()
+            .setRemote("origin")
+            .setCredentialsProvider(credentials(config))
+            .call()
+        val fetchMessages = fetchResult.messages.orEmpty().trim()
+        if (fetchMessages.isNotBlank()) {
+            logger("fetch 消息: $fetchMessages")
+        }
+        val remoteMainRef = git.repository.findRef("refs/remotes/origin/$DEFAULT_BRANCH")
+        if (remoteMainRef == null) {
+            logger("远端尚无 $DEFAULT_BRANCH 分支，跳过 pull。")
+            return
+        }
+        throw IllegalStateException("Git pull 失败，请检查远端分支状态后重试。")
     }
 
     private fun commitAndPushIfNeeded(
@@ -911,27 +1111,55 @@ private class RemoteSyncGitService(
         config: RemoteSyncConfig,
         message: String,
         paths: List<String>,
+        logger: (String) -> Unit,
     ) {
+        logger("暂存路径: ${paths.joinToString()}")
         paths.forEach { path ->
             git.add().addFilepattern(path).call()
             git.add().setUpdate(true).addFilepattern(path).call()
         }
-        if (!git.status().call().hasUncommittedChanges()) return
-
-        git.commit().setMessage(message).call()
+        if (git.status().call().hasUncommittedChanges()) {
+            git.commit().setMessage(message).call()
+            logger("已提交: $message")
+        } else {
+            logger("无本地变更，尝试直接 push。")
+        }
         try {
-            git.push()
-                .setRemote("origin")
-                .setCredentialsProvider(credentials(config))
-                .setRefSpecs(RefSpec("refs/heads/$DEFAULT_BRANCH:refs/heads/$DEFAULT_BRANCH"))
-                .call()
+            pushOrThrow(git, config)
         } catch (_: TransportException) {
-            safePull(git, config)
+            logger("push 遇到传输异常，尝试先 pull 再重试。")
+            safePull(git, config, logger)
+            pushOrThrow(git, config)
+        } catch (_: IllegalStateException) {
+            logger("push 被拒绝，尝试先 pull 再重试。")
+            safePull(git, config, logger)
+            pushOrThrow(git, config)
+        }
+    }
+
+    private fun pushOrThrow(
+        git: Git,
+        config: RemoteSyncConfig,
+    ) {
+        val results =
             git.push()
                 .setRemote("origin")
                 .setCredentialsProvider(credentials(config))
                 .setRefSpecs(RefSpec("refs/heads/$DEFAULT_BRANCH:refs/heads/$DEFAULT_BRANCH"))
                 .call()
+        ensurePushSucceeded(results)
+    }
+
+    private fun ensurePushSucceeded(results: Iterable<PushResult>) {
+        results.forEach { result ->
+            result.remoteUpdates.forEach { update ->
+                if (
+                    update.status != RemoteRefUpdate.Status.OK &&
+                    update.status != RemoteRefUpdate.Status.UP_TO_DATE
+                ) {
+                    throw IllegalStateException("Git push 失败：${update.status}")
+                }
+            }
         }
     }
 
@@ -1079,6 +1307,46 @@ private fun countFilesInFolderTree(
     val root = DocumentFile.fromTreeUri(context, treeUri) ?: return null
     if (!root.exists() || !root.isDirectory) return null
     return runCatching { countFilesRecursively(root) }.getOrNull()
+}
+
+private fun countFilesInRepoEntryDirectory(
+    repoRootDir: File,
+    repoPath: String,
+): Int? {
+    val entryDir = resolveRepoEntryDirectory(repoRootDir, repoPath) ?: return null
+    if (!entryDir.exists() || !entryDir.isDirectory) return null
+    return runCatching {
+        entryDir
+            .walkTopDown()
+            .filter { it.isFile && it.name != ENTRY_META_FILE }
+            .count()
+    }.getOrNull()
+}
+
+private fun resolveWordNoteFolderUri(
+    entry: SyncEntryUi,
+    repoRootPath: String,
+): String? {
+    if (!entry.folderUri.isNullOrBlank()) return entry.folderUri
+    val repoRootDir = File(repoRootPath)
+    val entryDir = resolveRepoEntryDirectory(repoRootDir, entry.repoPath) ?: return null
+    if (!entryDir.exists() || !entryDir.isDirectory) return null
+    return Uri.fromFile(entryDir).toString()
+}
+
+private fun resolveRepoEntryDirectory(
+    repoRootDir: File,
+    repoPath: String,
+): File? {
+    return runCatching {
+        val base = repoRootDir.canonicalFile
+        val target = File(repoRootDir, repoPath).canonicalFile
+        if (target.path == base.path || target.path.startsWith(base.path + File.separator)) {
+            target
+        } else {
+            null
+        }
+    }.getOrNull()
 }
 
 private fun countFilesRecursively(directory: DocumentFile): Int {
