@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,6 +44,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
@@ -128,6 +131,8 @@ class MainActivity : ComponentActivity() {
                             onSelectMatchMode = vm::setMatchMode,
                             onMatchSubtitle = vm::matchSubtitle,
                             onBatchMatchAuto = vm::batchMatchAuto,
+                            onOffsetSubtitle = vm::offsetSubtitle,
+                            onBatchOffsetSubtitles = vm::batchOffsetSubtitles,
                             onConfirmCandidate = vm::confirmCandidate,
                             onDismissCandidates = vm::dismissCandidates,
                         )
@@ -503,6 +508,125 @@ class MainViewModel(
         }
     }
 
+    fun offsetSubtitle(videoId: String, offsetMillis: Long) {
+        if (_uiState.value.batchRunning) return
+        val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
+        _uiState.update { state ->
+            state.copy(
+                videos =
+                    state.videos.map { item ->
+                        if (item.id == videoId) item.copy(subtitleStatus = "正在偏移字幕...", matching = true) else item
+                    },
+                message = "正在偏移字幕：${target.title}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val output =
+                runCatching { offsetMatchedSubtitleForVideo(target, offsetMillis) }
+                    .getOrElse { error -> "偏移失败：${error.message ?: "未知错误"}" }
+
+            _uiState.update { state ->
+                state.copy(
+                    videos =
+                        state.videos.map { item ->
+                            if (item.id == videoId) item.copy(subtitleStatus = output, matching = false) else item
+                        },
+                    message = output,
+                )
+            }
+        }
+    }
+
+    fun batchOffsetSubtitles(offsetMillis: Long) {
+        val snapshot = _uiState.value
+        if (snapshot.batchRunning) return
+        if (snapshot.loading) return
+        val folderUri = snapshot.videos.firstOrNull()?.folderUri
+        if (folderUri == null) {
+            _uiState.update { it.copy(message = "批量偏移失败：当前没有可处理的视频目录。") }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                batchRunning = true,
+                batchViewerVisible = true,
+                batchTotal = 0,
+                batchDone = 0,
+                batchLogs = listOf("批量偏移准备中：正在扫描 sub 目录字幕文件..."),
+                message = "批量偏移准备中：正在扫描 sub 目录字幕文件...",
+            )
+        }
+        Log.i(TAG_BATCH, "[BATCH-OFFSET] preparing files...")
+
+        batchJob = viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val subtitleFiles = collectShiftableSubtitleFiles(appContext, folderUri)
+                if (subtitleFiles.isEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            batchRunning = false,
+                            message = "批量偏移结束：sub 目录内没有可处理的 srt/ass/ssa 字幕。",
+                        )
+                    }
+                    appendBatchLog("批量偏移结束：sub 目录内没有可处理的 srt/ass/ssa 字幕。")
+                    Log.i(TAG_BATCH, "[BATCH-OFFSET] skip: no subtitle files")
+                    return@runCatching
+                }
+
+                _uiState.update {
+                    it.copy(
+                        batchTotal = subtitleFiles.size,
+                        batchDone = 0,
+                        batchLogs = listOf("批量偏移开始：共 ${subtitleFiles.size} 个字幕，偏移=${formatOffsetLabel(offsetMillis)}"),
+                        message = "批量偏移开始：共 ${subtitleFiles.size} 个字幕。",
+                    )
+                }
+                Log.i(TAG_BATCH, "[BATCH-OFFSET] start count=${subtitleFiles.size}, offset=$offsetMillis")
+
+                var success = 0
+                var failed = 0
+                subtitleFiles.forEachIndexed { index, file ->
+                    val seq = index + 1
+                    val fileName = file.name ?: "未知字幕"
+                    appendBatchLog("[$seq/${subtitleFiles.size}] 开始：$fileName")
+                    _uiState.update { it.copy(message = "批量偏移处理中（$seq/${subtitleFiles.size}）：$fileName") }
+                    val output =
+                        runCatching {
+                            val changedCount = applyOffsetToSubtitleFile(appContext, file, offsetMillis)
+                            "成功：$fileName（$changedCount 处时间）"
+                        }
+                    output.onSuccess {
+                        success += 1
+                        appendBatchLog("[$seq/${subtitleFiles.size}] $it")
+                    }.onFailure { error ->
+                        failed += 1
+                        appendBatchLog("[$seq/${subtitleFiles.size}] 失败：$fileName -> ${error.message ?: "未知错误"}")
+                    }
+                    _uiState.update { it.copy(batchDone = seq) }
+                    if (seq < subtitleFiles.size) {
+                        delay(200)
+                    }
+                }
+
+                val summary = "批量偏移完成：成功 $success，失败 $failed，偏移=${formatOffsetLabel(offsetMillis)}。"
+                appendBatchLog(summary)
+                _uiState.update { it.copy(batchRunning = false, message = summary) }
+                Log.i(TAG_BATCH, "[BATCH-OFFSET] done success=$success failed=$failed")
+            }.onFailure { error ->
+                Log.e(TAG_BATCH, "[BATCH-OFFSET] unexpected crash", error)
+                appendBatchLog("批量偏移异常终止：${error.message ?: "未知错误"}")
+                _uiState.update {
+                    it.copy(
+                        batchRunning = false,
+                        message = "批量偏移异常终止：${error.message ?: "未知错误"}",
+                    )
+                }
+            }
+        }
+    }
+
     fun batchMatchAuto() {
         val snapshot = _uiState.value
         if (snapshot.batchRunning) return
@@ -743,6 +867,58 @@ class MainViewModel(
         _uiState.update { it.copy(logs = listOf(log) + it.logs) }
     }
 
+    private fun offsetMatchedSubtitleForVideo(video: VideoItem, offsetMillis: Long): String {
+        val subtitleFile = findMatchingSubtitleFile(appContext, video.folderUri, video.title)
+            ?: return "偏移失败：未找到对应字幕。"
+        val subtitleName = subtitleFile.name ?: "未知字幕"
+        val changedCount = applyOffsetToSubtitleFile(appContext, subtitleFile, offsetMillis)
+        return "偏移成功：$subtitleName（$changedCount 处时间，${formatOffsetLabel(offsetMillis)}）"
+    }
+
+    private fun collectShiftableSubtitleFiles(
+        context: Context,
+        folderUri: Uri,
+    ): List<DocumentFile> {
+        val folder = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
+        val subDir = folder.findFile("sub")?.takeIf { it.isDirectory } ?: return emptyList()
+        return subDir
+            .listFiles()
+            .asSequence()
+            .filter { it.isFile }
+            .filter { file ->
+                val ext = file.name?.substringAfterLast('.', "")?.lowercase(Locale.ROOT).orEmpty()
+                isShiftSupportedSubtitleExtension(ext)
+            }
+            .sortedBy { it.name?.lowercase(Locale.ROOT).orEmpty() }
+            .toList()
+    }
+
+    private fun applyOffsetToSubtitleFile(
+        context: Context,
+        subtitleFile: DocumentFile,
+        offsetMillis: Long,
+    ): Int {
+        val fileName = subtitleFile.name ?: error("字幕文件名为空。")
+        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        val sourceText =
+            context.contentResolver.openInputStream(subtitleFile.uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                ?: error("无法读取字幕文件：$fileName")
+        val shifted =
+            when (ext) {
+                "srt" -> shiftSrtSubtitleContent(sourceText, offsetMillis)
+                "ass", "ssa" -> shiftAssSubtitleContent(sourceText, offsetMillis)
+                else -> error("不支持的字幕格式：$ext")
+            }
+        if (shifted.changedCount <= 0) {
+            error("文件中未找到可偏移的时间字段。")
+        }
+
+        context.contentResolver.openOutputStream(subtitleFile.uri, "rwt")?.bufferedWriter(Charsets.UTF_8)?.use {
+            it.write(shifted.content)
+        } ?: error("无法写入字幕文件：$fileName")
+        return shifted.changedCount
+    }
+
     private fun addFolderInternal(context: Context, treeUri: Uri) {
         val label = resolveFolderLabel(context, treeUri)
         val old = readFolderHistory().filterNot { it.uri.toString() == treeUri.toString() }
@@ -852,11 +1028,15 @@ private fun AppScreen(
     onSelectMatchMode: (MatchMode) -> Unit,
     onMatchSubtitle: (String) -> Unit,
     onBatchMatchAuto: () -> Unit,
+    onOffsetSubtitle: (String, Long) -> Unit,
+    onBatchOffsetSubtitles: (Long) -> Unit,
     onConfirmCandidate: (Int) -> Unit,
     onDismissCandidates: () -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
     var folderEditVisible by remember { mutableStateOf(false) }
+    var offsetVideo by remember { mutableStateOf<VideoItem?>(null) }
+    var batchOffsetDialogVisible by remember { mutableStateOf(false) }
     val context = LocalContext.current
     Scaffold(
         topBar = {
@@ -868,6 +1048,7 @@ private fun AppScreen(
                 folders = state.folderHistory,
                 onOpenLog = { logVisible = true },
                 onBatchMatchAuto = onBatchMatchAuto,
+                onBatchOffset = { batchOffsetDialogVisible = true },
                 onSelectMatchMode = onSelectMatchMode,
                 onSelectSubtitleSource = onSelectSubtitleSource,
                 onSelectSavedFolder = onSelectSavedFolder,
@@ -907,6 +1088,7 @@ private fun AppScreen(
                     VideoRow(
                         item = item,
                         onMatchSubtitle = { onMatchSubtitle(item.id) },
+                        onOffsetSubtitle = { offsetVideo = item },
                         onPlayVideo = { playVideoWithMpv(context, item.uri, item.folderUri, item.title) },
                     )
                 }
@@ -938,6 +1120,29 @@ private fun AppScreen(
         )
     }
 
+    offsetVideo?.let { target ->
+        SubtitleOffsetDialog(
+            title = "字幕偏移",
+            description = "输入偏移量（毫秒，可为负数）后，将修改该条目对应字幕的全部时间。",
+            onDismiss = { offsetVideo = null },
+            onConfirm = { offset ->
+                onOffsetSubtitle(target.id, offset)
+                offsetVideo = null
+            },
+        )
+    }
+
+    if (batchOffsetDialogVisible) {
+        SubtitleOffsetDialog(
+            title = "批量字幕偏移",
+            description = "输入偏移量（毫秒，可为负数）后，将修改当前目录 sub 文件夹下全部 srt/ass/ssa 字幕。",
+            onDismiss = { batchOffsetDialogVisible = false },
+            onConfirm = { offset ->
+                onBatchOffsetSubtitles(offset)
+                batchOffsetDialogVisible = false
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -950,6 +1155,7 @@ private fun AppTopBar(
     folders: List<SavedFolder>,
     onOpenLog: () -> Unit,
     onBatchMatchAuto: () -> Unit,
+    onBatchOffset: () -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
     onSelectSavedFolder: (Uri) -> Unit,
@@ -980,14 +1186,11 @@ private fun AppTopBar(
             ) {
                 Text("日志")
             }
-            TextButton(
-                onClick = onBatchMatchAuto,
-                enabled = !batchRunning,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.heightIn(min = 32.dp),
-            ) {
-                Text(if (batchRunning) "批量中..." else "批量")
-            }
+            BatchActionDropdown(
+                batchRunning = batchRunning,
+                onBatchMatchAuto = onBatchMatchAuto,
+                onBatchOffset = onBatchOffset,
+            )
             MatchModeDropdown(
                 selected = matchMode,
                 onSelect = onSelectMatchMode,
@@ -1003,6 +1206,105 @@ private fun AppTopBar(
             )
         }
     }
+}
+
+@Composable
+private fun BatchActionDropdown(
+    batchRunning: Boolean,
+    onBatchMatchAuto: () -> Unit,
+    onBatchOffset: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(
+            onClick = { expanded = true },
+            enabled = !batchRunning,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.heightIn(min = 32.dp),
+        ) {
+            Text(if (batchRunning) "批量中..." else "批量")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("批量匹配") },
+                onClick = {
+                    expanded = false
+                    onBatchMatchAuto()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("批量偏移") },
+                onClick = {
+                    expanded = false
+                    onBatchOffset()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SubtitleOffsetDialog(
+    title: String,
+    description: String,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit,
+) {
+    var offsetInput by remember { mutableStateOf("0") }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = offsetInput,
+                    onValueChange = {
+                        offsetInput = it
+                        errorText = null
+                    },
+                    label = { Text("偏移量（毫秒）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                )
+                if (errorText != null) {
+                    Text(
+                        text = errorText.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val parsed = offsetInput.trim().toLongOrNull()
+                    if (parsed == null) {
+                        errorText = "请输入有效整数，例如 250 或 -500。"
+                        return@TextButton
+                    }
+                    onConfirm(parsed)
+                },
+            ) {
+                Text("确定")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
@@ -1229,6 +1531,7 @@ private fun CandidateDialog(
 private fun VideoRow(
     item: VideoItem,
     onMatchSubtitle: () -> Unit,
+    onOffsetSubtitle: () -> Unit,
     onPlayVideo: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1260,7 +1563,14 @@ private fun VideoRow(
                     enabled = !item.matching,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(if (item.matching) "匹配中..." else "匹配并下载字幕")
+                    Text(if (item.matching) "匹配中..." else "匹配")
+                }
+                Button(
+                    onClick = onOffsetSubtitle,
+                    enabled = !item.matching,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("偏移")
                 }
                 Button(
                     onClick = onPlayVideo,
@@ -1319,7 +1629,13 @@ private fun findMatchingSubtitleUri(
     context: android.content.Context,
     folderUri: Uri,
     videoTitle: String,
-): Uri? {
+): Uri? = findMatchingSubtitleFile(context, folderUri, videoTitle)?.uri
+
+private fun findMatchingSubtitleFile(
+    context: android.content.Context,
+    folderUri: Uri,
+    videoTitle: String,
+): DocumentFile? {
     val folder = DocumentFile.fromTreeUri(context, folderUri) ?: return null
     val subDir = folder.findFile("sub")?.takeIf { it.isDirectory } ?: return null
     val targetBase = stripExtension(videoTitle).lowercase(Locale.ROOT)
@@ -1333,7 +1649,7 @@ private fun findMatchingSubtitleUri(
                 val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
                 if (!isSubtitleExtension(ext)) return@mapNotNull null
                 if (stripExtension(name).lowercase(Locale.ROOT) != targetBase) return@mapNotNull null
-                subtitlePriority(ext) to file.uri
+                subtitlePriority(ext) to file
             }
             .sortedBy { it.first }
             .toList()
@@ -1376,6 +1692,9 @@ private fun grantReadPermissionForMpv(
 private fun isSubtitleExtension(ext: String): Boolean =
     ext == "srt" || ext == "ass" || ext == "ssa" || ext == "vtt"
 
+private fun isShiftSupportedSubtitleExtension(ext: String): Boolean =
+    ext == "srt" || ext == "ass" || ext == "ssa"
+
 private fun subtitlePriority(ext: String): Int =
     when (ext) {
         "srt" -> 0
@@ -1389,6 +1708,104 @@ private fun stripExtension(name: String): String {
     val dot = name.lastIndexOf('.')
     return if (dot <= 0) name else name.substring(0, dot)
 }
+
+private data class ShiftSubtitleContentResult(
+    val content: String,
+    val changedCount: Int,
+)
+
+private val SRT_TIME_RANGE_REGEX =
+    Regex("""(?m)(\d{2,}:[0-5]\d:[0-5]\d,\d{3})(\s*-->\s*)(\d{2,}:[0-5]\d:[0-5]\d,\d{3})""")
+private val ASS_DIALOGUE_TIME_REGEX =
+    Regex("""(?m)^(Dialogue:[^,\r\n]*,)(\d+:[0-5]\d:[0-5]\d\.\d{2})(,)(\d+:[0-5]\d:[0-5]\d\.\d{2})(,.*)$""")
+
+private fun shiftSrtSubtitleContent(
+    content: String,
+    offsetMillis: Long,
+): ShiftSubtitleContentResult {
+    var changed = 0
+    val replaced =
+        SRT_TIME_RANGE_REGEX.replace(content) { match ->
+            val startMs = parseSrtTimestamp(match.groupValues[1]) ?: return@replace match.value
+            val separator = match.groupValues[2]
+            val endMs = parseSrtTimestamp(match.groupValues[3]) ?: return@replace match.value
+            changed += 1
+            val nextStart = formatSrtTimestamp((startMs + offsetMillis).coerceAtLeast(0L))
+            val nextEnd = formatSrtTimestamp((endMs + offsetMillis).coerceAtLeast(0L))
+            "$nextStart$separator$nextEnd"
+        }
+    return ShiftSubtitleContentResult(
+        content = replaced,
+        changedCount = changed,
+    )
+}
+
+private fun shiftAssSubtitleContent(
+    content: String,
+    offsetMillis: Long,
+): ShiftSubtitleContentResult {
+    var changed = 0
+    val replaced =
+        ASS_DIALOGUE_TIME_REGEX.replace(content) { match ->
+            val prefix = match.groupValues[1]
+            val startMs = parseAssTimestamp(match.groupValues[2]) ?: return@replace match.value
+            val middleComma = match.groupValues[3]
+            val endMs = parseAssTimestamp(match.groupValues[4]) ?: return@replace match.value
+            val suffix = match.groupValues[5]
+            changed += 1
+            val nextStart = formatAssTimestamp((startMs + offsetMillis).coerceAtLeast(0L))
+            val nextEnd = formatAssTimestamp((endMs + offsetMillis).coerceAtLeast(0L))
+            "$prefix$nextStart$middleComma$nextEnd$suffix"
+        }
+    return ShiftSubtitleContentResult(
+        content = replaced,
+        changedCount = changed,
+    )
+}
+
+private fun parseSrtTimestamp(raw: String): Long? {
+    val parts = raw.split(':', ',')
+    if (parts.size != 4) return null
+    val hours = parts[0].toLongOrNull() ?: return null
+    val minutes = parts[1].toLongOrNull() ?: return null
+    val seconds = parts[2].toLongOrNull() ?: return null
+    val millis = parts[3].toLongOrNull() ?: return null
+    if (minutes !in 0..59 || seconds !in 0..59 || millis !in 0..999) return null
+    return (((hours * 60L + minutes) * 60L + seconds) * 1000L) + millis
+}
+
+private fun formatSrtTimestamp(totalMillis: Long): String {
+    val clamped = totalMillis.coerceAtLeast(0L)
+    val hours = clamped / 3_600_000L
+    val minutes = (clamped % 3_600_000L) / 60_000L
+    val seconds = (clamped % 60_000L) / 1_000L
+    val millis = clamped % 1_000L
+    return String.format(Locale.US, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
+}
+
+private fun parseAssTimestamp(raw: String): Long? {
+    val parts = raw.split(':', '.')
+    if (parts.size != 4) return null
+    val hours = parts[0].toLongOrNull() ?: return null
+    val minutes = parts[1].toLongOrNull() ?: return null
+    val seconds = parts[2].toLongOrNull() ?: return null
+    val centis = parts[3].toLongOrNull() ?: return null
+    if (minutes !in 0..59 || seconds !in 0..59 || centis !in 0..99) return null
+    return (((hours * 60L + minutes) * 60L + seconds) * 1000L) + centis * 10L
+}
+
+private fun formatAssTimestamp(totalMillis: Long): String {
+    val clamped = totalMillis.coerceAtLeast(0L)
+    val totalCentis = (clamped + 5L) / 10L
+    val hours = totalCentis / 360_000L
+    val minutes = (totalCentis % 360_000L) / 6_000L
+    val seconds = (totalCentis % 6_000L) / 100L
+    val centis = totalCentis % 100L
+    return String.format(Locale.US, "%d:%02d:%02d.%02d", hours, minutes, seconds, centis)
+}
+
+private fun formatOffsetLabel(offsetMillis: Long): String =
+    if (offsetMillis >= 0) "+${offsetMillis}ms" else "${offsetMillis}ms"
 
 private fun episodeLabel(episode: Int?): String = if (episode == null) "电影" else "第${episode}集"
 
