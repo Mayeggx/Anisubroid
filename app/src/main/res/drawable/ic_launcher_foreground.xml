@@ -1,36 +1,72 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
+    android:viewportWidth="512"
+    android:viewportHeight="512">
     <path
-        android:fillColor="@color/launcher_card"
-        android:pathData="M54,20m-30,0a30,30 0,1 1,60 0a30,30 0,1 1,-60 0" />
+        android:fillColor="@color/launcher_hat"
+        android:pathData="M70,202C98,159 155,128 234,125C299,123 370,143 431,190C446,202 447,222 432,233C401,256 347,267 286,268C193,271 105,251 72,222C61,213 60,194 70,202Z" />
     <path
-        android:fillColor="@color/launcher_photo"
-        android:pathData="M28,50c0,-14 12,-26 26,-26s26,12 26,26v16c0,10 -8,18 -18,18h-16c-10,0 -18,-8 -18,-18z" />
+        android:fillColor="@color/launcher_hat_highlight"
+        android:pathData="M183,204C188,148 214,102 262,69C311,36 367,46 407,101C418,117 411,135 399,146C388,155 381,166 380,184L377,215C337,201 280,194 183,204Z" />
     <path
-        android:fillColor="@color/launcher_accent"
-        android:pathData="M18,44c2,-8 9,-14 17,-14s15,6 17,14l-6,6h-22z" />
+        android:fillColor="@color/launcher_band"
+        android:pathData="M228,146C279,138 322,143 365,161C356,175 349,188 344,203C302,188 261,184 218,189C220,172 223,158 228,146Z" />
     <path
-        android:fillColor="@color/launcher_accent"
-        android:pathData="M90,44c-2,-8 -9,-14 -17,-14s-15,6 -17,14l6,6h22z" />
+        android:fillColor="@color/launcher_gold"
+        android:pathData="M344,137C357,127 372,127 382,141C390,152 389,167 379,179C389,176 399,178 406,185C395,182 385,183 376,188C370,196 367,205 367,215C362,205 360,196 352,189C343,185 334,183 325,184C334,178 339,171 343,161C343,152 342,144 344,137Z" />
     <path
-        android:fillColor="@color/launcher_card"
-        android:pathData="M54,72m-14,0a14,14 0,1 1,28 0a14,14 0,1 1,-28 0" />
+        android:fillColor="@color/launcher_hair"
+        android:pathData="M167,267C167,210 204,173 257,173C306,173 347,208 350,261C353,319 331,381 287,408C245,433 190,420 165,375C153,353 148,317 167,267Z" />
     <path
-        android:fillColor="@color/launcher_ink"
-        android:pathData="M47,69m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+        android:fillColor="@color/launcher_skin"
+        android:pathData="M188,250C194,214 223,188 258,188C293,188 324,214 329,250C335,291 319,333 287,355C267,368 244,371 225,362C193,346 178,295 188,250Z" />
     <path
-        android:fillColor="@color/launcher_ink"
-        android:pathData="M59,69m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+        android:fillColor="@color/launcher_hair"
+        android:pathData="M190,249C192,218 209,194 238,185C250,181 265,182 280,186C296,189 308,197 320,209C311,207 301,208 293,214C283,222 277,236 272,250C266,236 258,222 246,214C235,206 220,207 205,212C197,218 192,231 190,249Z" />
     <path
-        android:fillColor="@color/launcher_ink"
-        android:pathData="M49,77c3,2 8,2 11,0c1,-1 2,0 1,1c-4,3 -9,3 -13,0c-1,-1 0,-2 1,-1z" />
+        android:fillColor="@color/launcher_hair"
+        android:pathData="M314,235C331,247 344,264 351,286C357,306 355,326 350,342C343,359 330,370 314,373C328,349 334,318 331,283C329,266 323,249 314,235Z" />
     <path
-        android:fillColor="@color/launcher_accent"
-        android:pathData="M23,50c0,-4 3,-7 7,-7s7,3 7,7s-3,7 -7,7s-7,-3 -7,-7z" />
+        android:fillColor="@color/launcher_skin"
+        android:pathData="M331,252C347,258 354,275 348,291C343,305 328,313 315,307C306,303 302,292 305,281C309,266 317,255 331,252Z" />
     <path
-        android:fillColor="@color/launcher_accent"
-        android:pathData="M71,50c0,-4 3,-7 7,-7s7,3 7,7s-3,7 -7,7s-7,-3 -7,-7z" />
+        android:fillColor="@color/launcher_eye_white"
+        android:pathData="M205,267m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0" />
+    <path
+        android:fillColor="@color/launcher_eye_white"
+        android:pathData="M257,267m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0" />
+    <path
+        android:fillColor="@color/launcher_eye_iris"
+        android:pathData="M231,272m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <path
+        android:fillColor="@color/launcher_eye_iris"
+        android:pathData="M283,272m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <path
+        android:fillColor="@color/white"
+        android:fillAlpha="0.72"
+        android:pathData="M239,233m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+    <path
+        android:fillColor="@color/launcher_eye_iris"
+        android:pathData="M252,283C259,279 267,281 271,286C272,292 266,296 259,296C252,294 249,288 252,283Z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M233,313C247,325 269,325 283,312"
+        android:strokeColor="@color/launcher_line"
+        android:strokeLineCap="round"
+        android:strokeWidth="7" />
+    <path
+        android:fillColor="@color/launcher_blush"
+        android:fillAlpha="0.72"
+        android:pathData="M196,304m-15,0a15,9 0,1 1,30 0a15,9 0,1 1,-30 0" />
+    <path
+        android:fillColor="@color/launcher_blush"
+        android:fillAlpha="0.72"
+        android:pathData="M289,304m-15,0a15,9 0,1 1,30 0a15,9 0,1 1,-30 0" />
+    <path
+        android:fillColor="@color/launcher_shirt"
+        android:pathData="M210,385C227,368 245,359 256,358C268,360 286,371 303,389C286,405 267,414 256,416C245,413 225,404 210,385Z" />
+    <path
+        android:fillColor="@color/launcher_shirt_accent"
+        android:pathData="M224,388C240,376 250,371 256,371C262,372 273,378 289,389C279,396 268,402 256,404C244,401 234,396 224,388Z" />
 </vector>

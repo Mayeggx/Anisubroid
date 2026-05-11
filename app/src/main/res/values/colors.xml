@@ -1,9 +1,17 @@
-﻿<resources>
+<resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
-    <color name="launcher_background">#FFF3EFE6</color>
-    <color name="launcher_card">#FFFFFFFF</color>
-    <color name="launcher_photo">#FFD8E7FF</color>
-    <color name="launcher_accent">#FF2D6CDF</color>
-    <color name="launcher_ink">#FF102A43</color>
+    <color name="launcher_background">#FFF6EEE6</color>
+    <color name="launcher_hat">#FF30386F</color>
+    <color name="launcher_hat_highlight">#FF454C89</color>
+    <color name="launcher_band">#FFE1839D</color>
+    <color name="launcher_gold">#FFEACD86</color>
+    <color name="launcher_hair">#FF5A3E4D</color>
+    <color name="launcher_skin">#FFF7F0E8</color>
+    <color name="launcher_eye_white">#FFFFFDFD</color>
+    <color name="launcher_eye_iris">#FFC96A74</color>
+    <color name="launcher_line">#FF5F4653</color>
+    <color name="launcher_blush">#FFEFC0BC</color>
+    <color name="launcher_shirt">#FFFAFAFC</color>
+    <color name="launcher_shirt_accent">#FFD98A9B</color>
 </resources>

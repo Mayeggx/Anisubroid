@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Anisubroid launcher icon preview</title>
+  <desc id="desc">A simplified vector icon inspired by the provided witch hat anime portrait.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f8f4ef"/>
+      <stop offset="100%" stop-color="#efe5dc"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#1f2340" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect x="24" y="24" width="464" height="464" rx="128" fill="url(#bg)"/>
+
+  <g filter="url(#shadow)">
+    <ellipse cx="255" cy="372" rx="116" ry="38" fill="#d9cbc0" opacity="0.38"/>
+
+    <path
+      fill="#2f366f"
+      d="M70 202
+         C98 159 155 128 234 125
+         C299 123 370 143 431 190
+         C446 202 447 222 432 233
+         C401 256 347 267 286 268
+         C193 271 105 251 72 222
+         C61 213 60 194 70 202Z"/>
+
+    <path
+      fill="#3c427d"
+      d="M183 204
+         C188 148 214 102 262 69
+         C311 36 367 46 407 101
+         C418 117 411 135 399 146
+         C388 155 381 166 380 184
+         L377 215
+         C337 201 280 194 183 204Z"/>
+
+    <path
+      fill="#de7f96"
+      d="M228 146
+         C279 138 322 143 365 161
+         C356 175 349 188 344 203
+         C302 188 261 184 218 189
+         C220 172 223 158 228 146Z"/>
+
+    <path
+      fill="#f3d18f"
+      d="M344 137
+         C357 127 372 127 382 141
+         C390 152 389 167 379 179
+         C389 176 399 178 406 185
+         C395 182 385 183 376 188
+         C370 196 367 205 367 215
+         C362 205 360 196 352 189
+         C343 185 334 183 325 184
+         C334 178 339 171 343 161
+         C343 152 342 144 344 137Z"/>
+
+    <path
+      fill="#5b3e4f"
+      d="M167 267
+         C167 210 204 173 257 173
+         C306 173 347 208 350 261
+         C353 319 331 381 287 408
+         C245 433 190 420 165 375
+         C153 353 148 317 167 267Z"/>
+
+    <path
+      fill="#f6efe7"
+      d="M188 250
+         C194 214 223 188 258 188
+         C293 188 324 214 329 250
+         C335 291 319 333 287 355
+         C267 368 244 371 225 362
+         C193 346 178 295 188 250Z"/>
+
+    <path
+      fill="#5c3f4f"
+      d="M190 249
+         C192 218 209 194 238 185
+         C250 181 265 182 280 186
+         C296 189 308 197 320 209
+         C311 207 301 208 293 214
+         C283 222 277 236 272 250
+         C266 236 258 222 246 214
+         C235 206 220 207 205 212
+         C197 218 192 231 190 249Z"/>
+
+    <path
+      fill="#5c3f4f"
+      d="M314 235
+         C331 247 344 264 351 286
+         C357 306 355 326 350 342
+         C343 359 330 370 314 373
+         C328 349 334 318 331 283
+         C329 266 323 249 314 235Z"/>
+
+    <path
+      fill="#f6efe7"
+      d="M331 252
+         C347 258 354 275 348 291
+         C343 305 328 313 315 307
+         C306 303 302 292 305 281
+         C309 266 317 255 331 252Z"/>
+
+    <circle cx="229" cy="267" r="24" fill="#fbfbfb"/>
+    <circle cx="281" cy="267" r="24" fill="#fbfbfb"/>
+    <circle cx="238" cy="272" r="7" fill="#cc6c77"/>
+    <circle cx="290" cy="272" r="7" fill="#cc6c77"/>
+    <circle cx="245" cy="233" r="6" fill="#ffffff" opacity="0.72"/>
+
+    <path
+      fill="#d66d76"
+      d="M252 283
+         C259 279 267 281 271 286
+         C272 292 266 296 259 296
+         C252 294 249 288 252 283Z"/>
+
+    <path
+      fill="none"
+      stroke="#5d4250"
+      stroke-width="7"
+      stroke-linecap="round"
+      d="M233 313 C247 325 269 325 283 312"/>
+
+    <ellipse cx="211" cy="304" rx="15" ry="9" fill="#efc0bc" opacity="0.72"/>
+    <ellipse cx="304" cy="304" rx="15" ry="9" fill="#efc0bc" opacity="0.72"/>
+
+    <path
+      fill="#f8f8fb"
+      d="M210 385
+         C227 368 245 359 256 358
+         C268 360 286 371 303 389
+         C286 405 267 414 256 416
+         C245 413 225 404 210 385Z"/>
+
+    <path
+      fill="#d78597"
+      d="M224 388
+         C240 376 250 371 256 371
+         C262 372 273 378 289 389
+         C279 396 268 402 256 404
+         C244 401 234 396 224 388Z"/>
+  </g>
+</svg>
