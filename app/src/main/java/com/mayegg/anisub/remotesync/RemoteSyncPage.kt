@@ -69,6 +69,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.api.errors.JGitInternalException
 import org.eclipse.jgit.api.errors.TransportException
 import org.eclipse.jgit.transport.PushResult
 import org.eclipse.jgit.transport.RefSpec
@@ -81,6 +82,7 @@ private const val DEFAULT_REMOTE_URL = "https://gitee.com/mayeggx/pic4nisub.git"
 private const val DEFAULT_BRANCH = "main"
 private const val ENTRIES_DIR = "entries"
 private const val ENTRY_META_FILE = "entry.json"
+private const val DELETED_MARKERS_FILE = "deleted-files.json"
 private const val DEFAULT_IMAGE_SCALE_PERCENT = 50
 private const val DEFAULT_IMAGE_JPEG_QUALITY = 70
 
@@ -112,6 +114,7 @@ data class RepoEntryMeta(
     val deviceName: String,
     val repoPath: String,
     val updatedAt: Long,
+    val clearedAt: Long = 0L,
 )
 
 data class SyncEntryUi(
@@ -602,10 +605,19 @@ class RemoteSyncViewModel(
             operationName = "Pull",
         ) {
             val config = store.loadConfig()
+            val localBindings = store.loadBindings()
             gitService.pull(config, logger = ::appendGitLog)
+            val remoteEntries = gitService.scanRemoteEntries()
+            val clearSync = syncRemoteClearsAfterPull(localBindings, remoteEntries)
             refreshEntryListInternal()
             val headSummary = appendHeadSummary(config)
-            "Pull 完成。$headSummary"
+            val clearMessage =
+                if (clearSync.clearedEntries > 0) {
+                    "同步清空 ${clearSync.clearedEntries} 个条目（本地删除 ${clearSync.clearedLocalFiles} 个文件，仓库缓存删除 ${clearSync.clearedRepoFiles} 个文件）。"
+                } else {
+                    ""
+                }
+            "Pull 完成。${if (clearMessage.isBlank()) "" else "$clearMessage "}$headSummary"
         }
     }
 
@@ -689,7 +701,7 @@ class RemoteSyncViewModel(
             val message =
                 runCatching { task() }
                     .getOrElse {
-                        val errorMessage = "失败：${it.message ?: "未知错误"}"
+                        val errorMessage = "失败：${buildUserFacingErrorMessage(it)}"
                         operationName?.let { op -> appendGitLog("$op: $errorMessage") }
                         errorMessage
                     }
@@ -728,6 +740,52 @@ class RemoteSyncViewModel(
             throw IllegalStateException("该条目不支持当前设备执行 Push。")
         }
         return entry
+    }
+
+    private fun syncRemoteClearsAfterPull(
+        localBindings: List<EntryBinding>,
+        remoteEntries: List<RepoEntryMeta>,
+    ): ClearSyncStats {
+        val remoteById = remoteEntries.associateBy { it.id }
+        var clearedEntries = 0
+        var clearedLocalFiles = 0
+        var clearedRepoFiles = 0
+
+        localBindings.forEach { binding ->
+            if (binding.deviceId != deviceInfo.id) return@forEach
+            val remote = remoteById[binding.id] ?: return@forEach
+            if (remote.clearedAt <= 0L) return@forEach
+
+            appendGitLog("检测到远端已清空，开始同步本地：${binding.displayName}")
+
+            val localDeleted =
+                if (binding.folderUri.isBlank()) {
+                    0
+                } else {
+                    val localCount = countFilesInFolderTree(appContext, binding.folderUri) ?: 0
+                    if (localCount <= 0) {
+                        0
+                    } else {
+                        runCatching { clearFolderTreeContents(appContext, binding.folderUri) }
+                            .onFailure { appendGitLog("清空本地绑定失败：${binding.displayName} - ${it.message}") }
+                            .getOrDefault(0)
+                    }
+                }
+
+            val repoDeleted = gitService.clearLocalEntryCache(remote.repoPath, logger = ::appendGitLog)
+
+            if (localDeleted > 0 || repoDeleted > 0) {
+                clearedEntries += 1
+                clearedLocalFiles += localDeleted
+                clearedRepoFiles += repoDeleted
+            }
+        }
+
+        return ClearSyncStats(
+            clearedEntries = clearedEntries,
+            clearedLocalFiles = clearedLocalFiles,
+            clearedRepoFiles = clearedRepoFiles,
+        )
     }
 
     private fun normalizeConfig(config: RemoteSyncConfig): RemoteSyncConfig =
@@ -874,6 +932,10 @@ private class RemoteSyncGitService(
         try {
             safePull(git, config, logger)
             val targetDir = File(repoDir, entry.repoPath)
+            val deletedMarkers = readDeletedMarkers(targetDir)
+            if (deletedMarkers.isNotEmpty()) {
+                logger("检测到 ${deletedMarkers.size} 个已删除标记，将跳过同名文件。")
+            }
             logger("复制目录: ${entry.folderUri} -> ${targetDir.absolutePath}")
             val stats =
                 copyFolderTree(
@@ -881,6 +943,7 @@ private class RemoteSyncGitService(
                     resolver = context.contentResolver,
                     treeUri = Uri.parse(entry.folderUri),
                     destinationDir = targetDir,
+                    deletedMarkers = deletedMarkers,
                     setting =
                         ImageCompressionSetting(
                             scalePercent = config.imageScalePercent.coerceIn(1, 100),
@@ -898,6 +961,7 @@ private class RemoteSyncGitService(
                         deviceName = entry.deviceName,
                         repoPath = entry.repoPath,
                         updatedAt = System.currentTimeMillis(),
+                        clearedAt = 0L,
                     ),
             )
             logger("写入元数据: ${entry.repoPath}/$ENTRY_META_FILE")
@@ -923,8 +987,19 @@ private class RemoteSyncGitService(
         try {
             safePull(git, config, logger)
             val targetDir = File(repoDir, entry.repoPath)
-            clearDirectoryContents(targetDir)
-            logger("已清空仓库目录: ${targetDir.absolutePath}")
+            val deletedMarkers = collectPayloadRelativePaths(targetDir)
+            if (deletedMarkers.isNotEmpty()) {
+                val mergedMarkers = (readDeletedMarkers(targetDir) + deletedMarkers).toSet()
+                writeDeletedMarkers(targetDir, mergedMarkers)
+                logger("已记录 ${deletedMarkers.size} 个删除标记，累计 ${mergedMarkers.size} 个。")
+            } else if (!File(targetDir, DELETED_MARKERS_FILE).exists()) {
+                writeDeletedMarkers(targetDir, emptySet())
+            }
+            clearDirectoryContents(
+                directory = targetDir,
+                preservedRootFiles = setOf(ENTRY_META_FILE, DELETED_MARKERS_FILE),
+            )
+            logger("已清空仓库目录（保留 $ENTRY_META_FILE）: ${targetDir.absolutePath}")
             writeEntryMetadata(
                 targetDir = targetDir,
                 entry =
@@ -935,6 +1010,7 @@ private class RemoteSyncGitService(
                         deviceName = entry.deviceName,
                         repoPath = entry.repoPath,
                         updatedAt = System.currentTimeMillis(),
+                        clearedAt = System.currentTimeMillis(),
                     ),
             )
             logger("重写元数据: ${entry.repoPath}/$ENTRY_META_FILE")
@@ -991,9 +1067,26 @@ private class RemoteSyncGitService(
                         deviceName = json.optString("deviceName"),
                         repoPath = json.optString("repoPath"),
                         updatedAt = json.optLong("updatedAt", file.lastModified()),
+                        clearedAt = json.optLong("clearedAt", 0L),
                     )
                 }.getOrNull()
             }.toList()
+    }
+
+    fun clearLocalEntryCache(
+        repoPath: String,
+        logger: (String) -> Unit = {},
+    ): Int {
+        val targetDir = File(repoDir, repoPath)
+        val deleted =
+            clearDirectoryContents(
+                directory = targetDir,
+                preservedRootFiles = setOf(ENTRY_META_FILE, DELETED_MARKERS_FILE),
+            )
+        if (deleted > 0) {
+            logger("已清理本地仓库缓存: $repoPath（删除 $deleted 个文件）")
+        }
+        return deleted
     }
 
     private fun openOrCreateRepository(
@@ -1130,6 +1223,17 @@ private class RemoteSyncGitService(
             logger("push 遇到传输异常，尝试先 pull 再重试。")
             safePull(git, config, logger)
             pushOrThrow(git, config)
+        } catch (error: JGitInternalException) {
+            val root = rootCause(error)
+            val rootMessage = buildUserFacingErrorMessage(error)
+            logger("push 内部异常：$rootMessage")
+            if (root is org.eclipse.jgit.errors.TransportException || root is java.io.IOException) {
+                logger("push 内部异常可重试，尝试先 pull 再重试。")
+                safePull(git, config, logger)
+                pushOrThrow(git, config)
+            } else {
+                throw IllegalStateException("Git push 失败：$rootMessage", error)
+            }
         } catch (_: IllegalStateException) {
             logger("push 被拒绝，尝试先 pull 再重试。")
             safePull(git, config, logger)
@@ -1177,17 +1281,24 @@ private class RemoteSyncGitService(
                 .put("deviceName", entry.deviceName)
                 .put("repoPath", entry.repoPath)
                 .put("updatedAt", entry.updatedAt)
+                .put("clearedAt", entry.clearedAt)
         metaFile.writeText(json.toString(2), Charsets.UTF_8)
     }
 
-    private fun clearDirectoryContents(directory: File) {
+    private fun clearDirectoryContents(
+        directory: File,
+        preservedRootFiles: Set<String> = emptySet(),
+    ): Int {
         if (!directory.exists()) {
             directory.mkdirs()
-            return
+            return 0
         }
+        var deletedFiles = 0
         directory.listFiles().orEmpty().forEach { child ->
-            child.deleteRecursively()
+            if (child.isFile && child.name in preservedRootFiles) return@forEach
+            deletedFiles += deleteRecursivelyAndCountFiles(child)
         }
+        return deletedFiles
     }
 }
 
@@ -1265,6 +1376,12 @@ private data class CopyStats(
         )
 }
 
+private data class ClearSyncStats(
+    val clearedEntries: Int = 0,
+    val clearedLocalFiles: Int = 0,
+    val clearedRepoFiles: Int = 0,
+)
+
 private fun resolveDeviceInfo(context: Context): DeviceInfo {
     val rawId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
     val fallback = "${Build.MANUFACTURER}-${Build.MODEL}-${Build.VERSION.SDK_INT}"
@@ -1318,7 +1435,7 @@ private fun countFilesInRepoEntryDirectory(
     return runCatching {
         entryDir
             .walkTopDown()
-            .filter { it.isFile && it.name != ENTRY_META_FILE }
+            .filter { it.isFile && it.name != ENTRY_META_FILE && it.name != DELETED_MARKERS_FILE }
             .count()
     }.getOrNull()
 }
@@ -1401,6 +1518,7 @@ private fun copyFolderTree(
     resolver: ContentResolver,
     treeUri: Uri,
     destinationDir: File,
+    deletedMarkers: Set<String>,
     setting: ImageCompressionSetting,
 ): CopyStats {
     val root = DocumentFile.fromTreeUri(context, treeUri)
@@ -1408,16 +1526,20 @@ private fun copyFolderTree(
     if (!root.isDirectory) throw IllegalStateException("所选路径不是文件夹。")
     return copyDocumentChildren(
         sourceDir = root,
+        entryRootDir = destinationDir,
         destinationDir = destinationDir,
         resolver = resolver,
+        deletedMarkers = deletedMarkers,
         setting = setting,
     )
 }
 
 private fun copyDocumentChildren(
     sourceDir: DocumentFile,
+    entryRootDir: File,
     destinationDir: File,
     resolver: ContentResolver,
+    deletedMarkers: Set<String>,
     setting: ImageCompressionSetting,
 ): CopyStats {
     if (!destinationDir.exists() && !destinationDir.mkdirs()) {
@@ -1430,10 +1552,10 @@ private fun copyDocumentChildren(
         val target = File(destinationDir, name)
         when {
             doc.isDirectory -> {
-                stats += copyDocumentChildren(doc, target, resolver, setting)
+                stats += copyDocumentChildren(doc, entryRootDir, target, resolver, deletedMarkers, setting)
             }
             doc.isFile -> {
-                stats += copySingleFile(doc, target, resolver, setting)
+                stats += copySingleFile(doc, target, entryRootDir, resolver, deletedMarkers, setting)
             }
         }
     }
@@ -1443,7 +1565,9 @@ private fun copyDocumentChildren(
 private fun copySingleFile(
     doc: DocumentFile,
     target: File,
+    entryRootDir: File,
     resolver: ContentResolver,
+    deletedMarkers: Set<String>,
     setting: ImageCompressionSetting,
 ): CopyStats {
     val shouldCompress = shouldCompressImage(doc)
@@ -1457,6 +1581,10 @@ private fun copySingleFile(
 
     if (!targetFile.parentFile.exists()) {
         targetFile.parentFile.mkdirs()
+    }
+
+    if (isMarkedDeleted(entryRootDir, targetFile, deletedMarkers)) {
+        return CopyStats(skippedFiles = 1)
     }
 
     if (targetFile.exists()) {
@@ -1488,6 +1616,21 @@ private fun shouldCompressImage(doc: DocumentFile): Boolean {
         name.endsWith(".webp") ||
         name.endsWith(".gif") ||
         name.endsWith(".bmp")
+}
+
+private fun isMarkedDeleted(
+    entryRootDir: File,
+    targetFile: File,
+    deletedMarkers: Set<String>,
+): Boolean {
+    if (deletedMarkers.isEmpty()) return false
+    val relativePath =
+        runCatching { targetFile.relativeTo(entryRootDir).path }
+            .getOrNull()
+            ?.let(::normalizeDeletedMarkerPath)
+            .orEmpty()
+    if (relativePath.isBlank()) return false
+    return relativePath in deletedMarkers
 }
 
 private fun buildCompressedImageName(originalName: String): String {
@@ -1563,3 +1706,116 @@ private fun credentials(config: RemoteSyncConfig): UsernamePasswordCredentialsPr
         config.gitUsername.ifBlank { "oauth2" },
         config.gitToken,
     )
+
+private fun collectPayloadRelativePaths(entryDir: File): Set<String> {
+    if (!entryDir.exists() || !entryDir.isDirectory) return emptySet()
+    val paths = linkedSetOf<String>()
+    entryDir.walkTopDown().forEach { file ->
+        if (!file.isFile) return@forEach
+        val relativePath =
+            runCatching { file.relativeTo(entryDir).path }
+                .getOrNull()
+                ?.let(::normalizeDeletedMarkerPath)
+                .orEmpty()
+        if (relativePath.isBlank()) return@forEach
+        if (isSpecialRepoFile(relativePath)) return@forEach
+        paths += relativePath
+    }
+    return paths
+}
+
+private fun isSpecialRepoFile(relativePath: String): Boolean {
+    val normalized = normalizeDeletedMarkerPath(relativePath)
+    return normalized == normalizeDeletedMarkerPath(ENTRY_META_FILE) ||
+        normalized == normalizeDeletedMarkerPath(DELETED_MARKERS_FILE)
+}
+
+private fun readDeletedMarkers(entryDir: File): Set<String> {
+    val markerFile = File(entryDir, DELETED_MARKERS_FILE)
+    if (!markerFile.exists()) return emptySet()
+    return runCatching {
+        val raw = markerFile.readText(Charsets.UTF_8).trim()
+        val paths =
+            if (raw.startsWith("[")) {
+                JSONArray(raw)
+            } else {
+                JSONObject(raw).optJSONArray("paths") ?: JSONArray()
+            }
+        buildSet {
+            for (index in 0 until paths.length()) {
+                val normalized = normalizeDeletedMarkerPath(paths.optString(index))
+                if (normalized.isNotBlank()) add(normalized)
+            }
+        }
+    }.getOrDefault(emptySet())
+}
+
+private fun writeDeletedMarkers(
+    entryDir: File,
+    markers: Set<String>,
+) {
+    if (!entryDir.exists()) entryDir.mkdirs()
+    val markerFile = File(entryDir, DELETED_MARKERS_FILE)
+    val normalized =
+        markers
+            .map(::normalizeDeletedMarkerPath)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+    val jsonArray = JSONArray()
+    normalized.forEach(jsonArray::put)
+    val payload =
+        JSONObject()
+            .put("paths", jsonArray)
+            .put("updatedAt", System.currentTimeMillis())
+    markerFile.writeText(payload.toString(2), Charsets.UTF_8)
+}
+
+private fun normalizeDeletedMarkerPath(path: String): String =
+    path
+        .replace('\\', '/')
+        .trim()
+        .trim('/')
+        .lowercase(Locale.ROOT)
+
+private fun rootCause(error: Throwable): Throwable {
+    var current = error
+    while (current.cause != null && current.cause !== current) {
+        current = current.cause!!
+    }
+    return current
+}
+
+private fun buildUserFacingErrorMessage(error: Throwable): String {
+    val root = rootCause(error)
+    val rootMessage = root.message?.trim().orEmpty()
+    if (rootMessage.isNotBlank()) return rootMessage
+    val directMessage = error.message?.trim().orEmpty()
+    if (directMessage.isNotBlank()) return directMessage
+    return root::class.java.simpleName.ifBlank { "未知错误" }
+}
+
+private fun deleteRecursivelyAndCountFiles(path: File): Int {
+    if (path.isFile) {
+        if (!path.delete()) {
+            throw IllegalStateException("无法删除文件: ${path.absolutePath}")
+        }
+        return 1
+    }
+
+    if (path.isDirectory) {
+        var deletedFiles = 0
+        path.listFiles().orEmpty().forEach { child ->
+            deletedFiles += deleteRecursivelyAndCountFiles(child)
+        }
+        if (!path.delete()) {
+            throw IllegalStateException("无法删除目录: ${path.absolutePath}")
+        }
+        return deletedFiles
+    }
+
+    if (!path.delete()) {
+        throw IllegalStateException("无法删除条目: ${path.absolutePath}")
+    }
+    return 0
+}
