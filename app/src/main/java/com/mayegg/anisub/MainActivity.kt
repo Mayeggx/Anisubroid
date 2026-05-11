@@ -716,12 +716,21 @@ class MainViewModel(
                             )
                         }
                         val output = runMatchByCurrentMode(videoId = video.id, source = source, mode = MatchMode.Auto)
-                        if (output.startsWith("匹配成功：")) {
+                        val matchedSuccessfully = output.startsWith("匹配成功：")
+                        if (matchedSuccessfully) {
                             success += 1
                             appendBatchLog("[$seq/${targets.size}] 成功：${video.title}")
                         } else {
                             failed += 1
                             appendBatchLog("[$seq/${targets.size}] 失败：${video.title} -> $output")
+                        }
+                        _uiState.update { state ->
+                            state.copy(
+                                videos = state.videos.map { item ->
+                                    if (item.id == video.id) item.copy(subtitleStatus = output, matching = false) else item
+                                },
+                                message = if (matchedSuccessfully) "批量成功（$seq/${targets.size}）：${video.title}" else output,
+                            )
                         }
                     }
                     _uiState.update { it.copy(batchDone = seq) }

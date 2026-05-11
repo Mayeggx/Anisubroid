@@ -53,6 +53,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.transport.PushResult
+import org.eclipse.jgit.transport.RefSpec
+import org.eclipse.jgit.transport.RemoteRefUpdate
+import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -74,6 +81,8 @@ class VideoDownloadActivity : ComponentActivity() {
                 onRemoveSubscription = vm::removeSubscription,
                 onOpenSubscription = vm::openSubscription,
                 onBackToList = vm::backToList,
+                onPullSubscriptionSync = vm::pullSubscriptionConfig,
+                onPushSubscriptionSync = vm::pushSubscriptionConfig,
                 onRefreshEntries = vm::refreshActiveSubscription,
                 onDownloadTorrent = vm::downloadTorrent,
                 onOpenTorrent = { path ->
@@ -97,6 +106,8 @@ fun VideoDownloadPage() {
         onRemoveSubscription = vm::removeSubscription,
         onOpenSubscription = vm::openSubscription,
         onBackToList = vm::backToList,
+        onPullSubscriptionSync = vm::pullSubscriptionConfig,
+        onPushSubscriptionSync = vm::pushSubscriptionConfig,
         onRefreshEntries = vm::refreshActiveSubscription,
         onDownloadTorrent = vm::downloadTorrent,
         onOpenTorrent = { path ->
@@ -117,6 +128,8 @@ fun VideoDownloadEmbeddedPage() {
         onRemoveSubscription = vm::removeSubscription,
         onOpenSubscription = vm::openSubscription,
         onBackToList = vm::backToList,
+        onPullSubscriptionSync = vm::pullSubscriptionConfig,
+        onPushSubscriptionSync = vm::pushSubscriptionConfig,
         onRefreshEntries = vm::refreshActiveSubscription,
         onDownloadTorrent = vm::downloadTorrent,
         onOpenTorrent = { path ->
@@ -152,6 +165,8 @@ private fun VideoDownloadScreenEmbedded(
     onRemoveSubscription: (String) -> Unit,
     onOpenSubscription: (String) -> Unit,
     onBackToList: () -> Unit,
+    onPullSubscriptionSync: () -> Unit,
+    onPushSubscriptionSync: () -> Unit,
     onRefreshEntries: () -> Unit,
     onDownloadTorrent: (String) -> Unit,
     onOpenTorrent: (String) -> Unit,
@@ -169,7 +184,9 @@ private fun VideoDownloadScreenEmbedded(
                 },
                 actions = {
                     if (state.activeSubscriptionId == null) {
-                        TextButton(onClick = { addDialogVisible = true }) { Text("添加") }
+                        TextButton(onClick = onPullSubscriptionSync, enabled = !state.syncingConfig) { Text("Pull") }
+                        TextButton(onClick = onPushSubscriptionSync, enabled = !state.syncingConfig) { Text("Push") }
+                        TextButton(onClick = { addDialogVisible = true }, enabled = !state.syncingConfig) { Text("添加") }
                     } else {
                         TextButton(onClick = onRefreshEntries) { Text("刷新") }
                     }
@@ -232,6 +249,7 @@ data class VideoDownloadUiState(
     val activeSubscriptionLabel: String = "",
     val activeEntries: List<TorrentEntryItem> = emptyList(),
     val loadingEntries: Boolean = false,
+    val syncingConfig: Boolean = false,
     val message: String = "请先添加视频订阅链接。",
 )
 
@@ -250,6 +268,19 @@ private data class ParsedTorrentEntry(
     val downloadUrl: String,
 )
 
+private data class SeedSyncConfig(
+    val remoteUrl: String = "https://gitee.com/mayeggx/pic4nisub.git",
+    val gitUsername: String = "",
+    val gitToken: String = "",
+    val commitUserName: String = "Anisubroid Remote Sync",
+    val commitUserEmail: String = "anisubroid@local",
+)
+
+private data class SeedPullResult(
+    val fileFound: Boolean,
+    val syncedCount: Int,
+)
+
 class VideoDownloadViewModel(
     application: android.app.Application,
 ) : AndroidViewModel(application) {
@@ -260,6 +291,12 @@ class VideoDownloadViewModel(
         private const val ROW_SEPARATOR = "\n"
         private const val FIELD_SEPARATOR = "\t"
         private const val DOWNLOAD_ROOT = "video_subscriptions"
+        private const val REMOTE_SYNC_PREF_NAME = "remote_sync_store"
+        private const val REMOTE_SYNC_CONFIG_KEY = "config"
+        private const val DEFAULT_REMOTE_URL = "https://gitee.com/mayeggx/pic4nisub.git"
+        private const val DEFAULT_REMOTE_BRANCH = "main"
+        private const val SEED_SYNC_REPO_SUBDIR = "remote-sync/repo-a"
+        private const val SEED_SYNC_FILE_NAME = "seed-subscriptions.json"
         private val ID_PATTERN = Regex("""/(view|download)/(\d+)""")
         private val ROW_PATTERN = Regex("""(?is)<tr[^>]*>(.*?)</tr>""")
         private val TD_PATTERN = Regex("""(?is)<td[^>]*>(.*?)</td>""")
@@ -269,6 +306,7 @@ class VideoDownloadViewModel(
 
     private val appContext = application.applicationContext
     private val prefs = application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    private val seedSyncRepoDir = File(appContext.filesDir, SEED_SYNC_REPO_SUBDIR)
     private val _uiState = MutableStateFlow(VideoDownloadUiState())
     val uiState: StateFlow<VideoDownloadUiState> = _uiState.asStateFlow()
 
@@ -286,6 +324,114 @@ class VideoDownloadViewModel(
 
     fun setMessage(message: String) {
         _uiState.update { it.copy(message = message) }
+    }
+
+    fun pushSubscriptionConfig() {
+        val snapshot = _uiState.value
+        if (snapshot.syncingConfig) return
+        _uiState.update { it.copy(syncingConfig = true, message = "正在 Push 订阅配置...") }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { pushSubscriptionConfigInternal() }
+                .onSuccess { count ->
+                    _uiState.update {
+                        it.copy(
+                            syncingConfig = false,
+                            subscriptions = subscriptions.map(::toUiSubscription),
+                            message = "Push 完成：已同步 $count 条订阅配置。",
+                        )
+                    }
+                }.onFailure { error ->
+                    Log.e(TAG, "Push subscription config failed.", error)
+                    _uiState.update {
+                        it.copy(
+                            syncingConfig = false,
+                            message = "Push 失败：${error.message ?: "未知错误"}",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun pullSubscriptionConfig() {
+        val snapshot = _uiState.value
+        if (snapshot.syncingConfig) return
+        _uiState.update { it.copy(syncingConfig = true, message = "正在 Pull 订阅配置...") }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { pullSubscriptionConfigInternal() }
+                .onSuccess { result ->
+                    _uiState.update { state ->
+                        state.copy(
+                            syncingConfig = false,
+                            subscriptions = subscriptions.map(::toUiSubscription),
+                            activeSubscriptionId = null,
+                            activeSubscriptionLabel = "",
+                            activeEntries = emptyList(),
+                            loadingEntries = false,
+                            message =
+                                if (result.fileFound) {
+                                    "Pull 完成：已同步 ${result.syncedCount} 条订阅配置。"
+                                } else {
+                                    "Pull 完成：远端仓库尚未创建订阅配置文件。"
+                                },
+                        )
+                    }
+                }.onFailure { error ->
+                    Log.e(TAG, "Pull subscription config failed.", error)
+                    _uiState.update {
+                        it.copy(
+                            syncingConfig = false,
+                            message = "Pull 失败：${error.message ?: "未知错误"}",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun pushSubscriptionConfigInternal(): Int {
+        val config = loadSeedSyncConfig()
+        val git = openOrCreateSeedSyncRepository(config)
+        try {
+            safePullSeedSync(git, config)
+            val uniqueUrls = subscriptions.map { it.url }.distinct()
+            val syncFile = File(seedSyncRepoDir, SEED_SYNC_FILE_NAME)
+            syncFile.writeText(buildSeedSyncPayload(uniqueUrls), Charsets.UTF_8)
+            commitAndPushIfNeeded(
+                git = git,
+                config = config,
+                message = "seed-sync: update subscriptions",
+                paths = listOf(SEED_SYNC_FILE_NAME),
+            )
+            return uniqueUrls.size
+        } finally {
+            git.close()
+        }
+    }
+
+    private fun pullSubscriptionConfigInternal(): SeedPullResult {
+        val config = loadSeedSyncConfig()
+        val git = openOrCreateSeedSyncRepository(config)
+        try {
+            safePullSeedSync(git, config)
+            val syncFile = File(seedSyncRepoDir, SEED_SYNC_FILE_NAME)
+            if (!syncFile.exists()) {
+                return SeedPullResult(
+                    fileFound = false,
+                    syncedCount = subscriptions.size,
+                )
+            }
+
+            val urls = parseSeedSyncPayload(syncFile.readText(Charsets.UTF_8))
+            subscriptions = mergeSubscriptionsByUrls(urls)
+            persistSubscriptions()
+            return SeedPullResult(
+                fileFound = true,
+                syncedCount = subscriptions.size,
+            )
+        } finally {
+            git.close()
+        }
     }
 
     fun addSubscription(rawUrl: String) {
@@ -590,6 +736,225 @@ class VideoDownloadViewModel(
             .replace(Regex("\\s+"), " ")
             .trim()
 
+    private fun mergeSubscriptionsByUrls(rawUrls: List<String>): List<PersistedSubscription> {
+        val existingByUrl = subscriptions.associateBy { it.url }
+        val merged = mutableListOf<PersistedSubscription>()
+        rawUrls.forEach { rawUrl ->
+            val normalized = normalizeSubscriptionUrl(rawUrl) ?: return@forEach
+            val existing = existingByUrl[normalized]
+            if (existing != null) {
+                merged += existing
+            } else {
+                val uri = Uri.parse(normalized)
+                val label = buildSubscriptionLabel(uri)
+                val id = generateSubscriptionId()
+                merged += PersistedSubscription(
+                    id = id,
+                    label = label,
+                    url = normalized,
+                    folderName = buildFolderName(label, id),
+                )
+            }
+        }
+        return merged.distinctBy { it.url }
+    }
+
+    private fun generateSubscriptionId(): String = "${System.currentTimeMillis()}_${Random.nextInt(1000, 9999)}"
+
+    private fun normalizeSubscriptionUrl(rawUrl: String): String? {
+        val url = rawUrl.trim()
+        if (url.isBlank()) return null
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return null
+        if (uri.scheme.isNullOrBlank() || uri.host.isNullOrBlank()) return null
+        return uri.toString()
+    }
+
+    private fun buildSeedSyncPayload(urls: List<String>): String {
+        val entries = JSONArray()
+        urls.distinct().forEach { entries.put(JSONObject().put("url", it)) }
+        return JSONObject().put("entries", entries).toString(2)
+    }
+
+    private fun parseSeedSyncPayload(payload: String): List<String> {
+        val trimmed = payload.trim()
+        if (trimmed.isBlank()) return emptyList()
+        return runCatching {
+            when {
+                trimmed.startsWith("{") -> {
+                    val obj = JSONObject(trimmed)
+                    when {
+                        obj.has("entries") -> parseSeedSyncUrlArray(obj.optJSONArray("entries"))
+                        obj.has("urls") -> parseSeedSyncUrlArray(obj.optJSONArray("urls"))
+                        else -> emptyList()
+                    }
+                }
+
+                trimmed.startsWith("[") -> parseSeedSyncUrlArray(JSONArray(trimmed))
+                else -> emptyList()
+            }
+        }.getOrDefault(emptyList())
+            .mapNotNull(::normalizeSubscriptionUrl)
+            .distinct()
+    }
+
+    private fun parseSeedSyncUrlArray(arr: JSONArray?): List<String> {
+        if (arr == null) return emptyList()
+        return buildList {
+            for (index in 0 until arr.length()) {
+                when (val item = arr.opt(index)) {
+                    is String -> add(item)
+                    is JSONObject -> add(item.optString("url", ""))
+                }
+            }
+        }
+    }
+
+    private fun loadSeedSyncConfig(): SeedSyncConfig {
+        val remotePrefs = appContext.getSharedPreferences(REMOTE_SYNC_PREF_NAME, Context.MODE_PRIVATE)
+        val raw = remotePrefs.getString(REMOTE_SYNC_CONFIG_KEY, null).orEmpty()
+        if (raw.isBlank()) return SeedSyncConfig()
+        return runCatching {
+            val json = JSONObject(raw)
+            SeedSyncConfig(
+                remoteUrl = json.optString("remoteUrl", DEFAULT_REMOTE_URL).ifBlank { DEFAULT_REMOTE_URL },
+                gitUsername = json.optString("gitUsername", ""),
+                gitToken = json.optString("gitToken", ""),
+                commitUserName = json.optString("commitUserName", "Anisubroid Remote Sync"),
+                commitUserEmail = json.optString("commitUserEmail", "anisubroid@local"),
+            )
+        }.getOrDefault(SeedSyncConfig())
+    }
+
+    private fun openOrCreateSeedSyncRepository(config: SeedSyncConfig): Git {
+        seedSyncRepoDir.mkdirs()
+        val dotGit = File(seedSyncRepoDir, ".git")
+        if (dotGit.exists()) {
+            val git = Git.open(seedSyncRepoDir)
+            configureSeedSyncRepository(git, config)
+            return git
+        }
+
+        if (!seedSyncRepoDir.listFiles().isNullOrEmpty()) {
+            seedSyncRepoDir.deleteRecursively()
+            seedSyncRepoDir.mkdirs()
+        }
+
+        return runCatching {
+            val clone = Git.cloneRepository().setURI(config.remoteUrl).setDirectory(seedSyncRepoDir)
+            credentials(config)?.let { clone.setCredentialsProvider(it) }
+            val git = clone.call()
+            configureSeedSyncRepository(git, config)
+            git
+        }.getOrElse { error ->
+            throw IllegalStateException("无法克隆远端仓库：${error.message ?: "未知错误"}", error)
+        }
+    }
+
+    private fun configureSeedSyncRepository(
+        git: Git,
+        config: SeedSyncConfig,
+    ) {
+        val repoConfig = git.repository.config
+        repoConfig.setString("remote", "origin", "url", config.remoteUrl)
+        repoConfig.setStringList("remote", "origin", "fetch", listOf("+refs/heads/*:refs/remotes/origin/*"))
+        repoConfig.setString("branch", DEFAULT_REMOTE_BRANCH, "remote", "origin")
+        repoConfig.setString("branch", DEFAULT_REMOTE_BRANCH, "merge", "refs/heads/$DEFAULT_REMOTE_BRANCH")
+        repoConfig.setString("user", null, "name", config.commitUserName.ifBlank { "Anisubroid Remote Sync" })
+        repoConfig.setString("user", null, "email", config.commitUserEmail.ifBlank { "anisubroid@local" })
+        repoConfig.save()
+    }
+
+    private fun safePullSeedSync(
+        git: Git,
+        config: SeedSyncConfig,
+    ) {
+        val provider = credentials(config)
+        val pullCommand =
+            git.pull()
+                .setRemote("origin")
+                .setRemoteBranchName(DEFAULT_REMOTE_BRANCH)
+                .setRebase(true)
+        provider?.let { pullCommand.setCredentialsProvider(it) }
+        val pullResult =
+            runCatching { pullCommand.call() }
+                .getOrElse { error ->
+                    val message = error.message.orEmpty()
+                    if (!message.contains("unrelated", ignoreCase = true)) {
+                        throw error
+                    }
+                    val fetchCommand =
+                        git.fetch()
+                            .setRemote("origin")
+                            .setRefSpecs(RefSpec("+refs/heads/$DEFAULT_REMOTE_BRANCH:refs/remotes/origin/$DEFAULT_REMOTE_BRANCH"))
+                    provider?.let { fetchCommand.setCredentialsProvider(it) }
+                    fetchCommand.call()
+                    val remoteMainRef = git.repository.findRef("refs/remotes/origin/$DEFAULT_REMOTE_BRANCH") ?: return
+                    git.reset()
+                        .setMode(org.eclipse.jgit.api.ResetCommand.ResetType.HARD)
+                        .setRef(remoteMainRef.name)
+                        .call()
+                    return
+                }
+        if (pullResult.isSuccessful) return
+
+        val fetchCommand = git.fetch().setRemote("origin")
+        provider?.let { fetchCommand.setCredentialsProvider(it) }
+        fetchCommand.call()
+        val remoteMainRef = git.repository.findRef("refs/remotes/origin/$DEFAULT_REMOTE_BRANCH")
+        if (remoteMainRef == null) return
+        throw IllegalStateException("Git pull 失败，请检查远端分支状态后重试。")
+    }
+
+    private fun commitAndPushIfNeeded(
+        git: Git,
+        config: SeedSyncConfig,
+        message: String,
+        paths: List<String>,
+    ) {
+        paths.forEach { path ->
+            git.add().addFilepattern(path).call()
+            git.add().setUpdate(true).addFilepattern(path).call()
+        }
+        if (git.status().call().hasUncommittedChanges()) {
+            git.commit().setMessage(message).call()
+        }
+        pushOrThrow(git, config)
+    }
+
+    private fun pushOrThrow(
+        git: Git,
+        config: SeedSyncConfig,
+    ) {
+        val provider = credentials(config)
+        val push =
+            git.push()
+                .setRemote("origin")
+                .setRefSpecs(RefSpec("refs/heads/$DEFAULT_REMOTE_BRANCH:refs/heads/$DEFAULT_REMOTE_BRANCH"))
+        provider?.let { push.setCredentialsProvider(it) }
+        ensurePushSucceeded(push.call())
+    }
+
+    private fun ensurePushSucceeded(results: Iterable<PushResult>) {
+        results.forEach { result ->
+            result.remoteUpdates.forEach { update ->
+                if (
+                    update.status != RemoteRefUpdate.Status.OK &&
+                    update.status != RemoteRefUpdate.Status.UP_TO_DATE
+                ) {
+                    throw IllegalStateException("Git push 失败：${update.status}")
+                }
+            }
+        }
+    }
+
+    private fun credentials(config: SeedSyncConfig): UsernamePasswordCredentialsProvider? {
+        if (config.gitUsername.isBlank() && config.gitToken.isBlank()) return null
+        return UsernamePasswordCredentialsProvider(
+            config.gitUsername.ifBlank { "oauth2" },
+            config.gitToken,
+        )
+    }
+
     private fun buildSubscriptionLabel(uri: Uri): String {
         val query = uri.getQueryParameter("q").orEmpty().replace('+', ' ').trim()
         if (query.isNotBlank()) return query
@@ -618,6 +983,8 @@ private fun VideoDownloadScreen(
     onRemoveSubscription: (String) -> Unit,
     onOpenSubscription: (String) -> Unit,
     onBackToList: () -> Unit,
+    onPullSubscriptionSync: () -> Unit,
+    onPushSubscriptionSync: () -> Unit,
     onRefreshEntries: () -> Unit,
     onDownloadTorrent: (String) -> Unit,
     onOpenTorrent: (String) -> Unit,
@@ -637,7 +1004,9 @@ private fun VideoDownloadScreen(
                 },
                 actions = {
                     if (state.activeSubscriptionId == null) {
-                        TextButton(onClick = { addDialogVisible = true }) { Text("添加") }
+                        TextButton(onClick = onPullSubscriptionSync, enabled = !state.syncingConfig) { Text("Pull") }
+                        TextButton(onClick = onPushSubscriptionSync, enabled = !state.syncingConfig) { Text("Push") }
+                        TextButton(onClick = { addDialogVisible = true }, enabled = !state.syncingConfig) { Text("添加") }
                     } else {
                         TextButton(onClick = onRefreshEntries) { Text("刷新") }
                     }
