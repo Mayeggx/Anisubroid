@@ -1069,6 +1069,8 @@ private fun SubscriptionList(
     onOpenSubscription: (String) -> Unit,
     onRemoveSubscription: (String) -> Unit,
 ) {
+    var pendingDelete by remember { mutableStateOf<VideoSubscriptionItem?>(null) }
+
     if (subscriptions.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -1119,7 +1121,7 @@ private fun SubscriptionList(
                             Text("查看条目")
                         }
                         TextButton(
-                            onClick = { onRemoveSubscription(item.id) },
+                            onClick = { pendingDelete = item },
                             modifier = Modifier.weight(1f),
                         ) {
                             Text("删除")
@@ -1128,6 +1130,29 @@ private fun SubscriptionList(
                 }
             }
         }
+    }
+
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("确认删除") },
+            text = { Text("确定删除订阅“${target.label}”吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemoveSubscription(target.id)
+                        pendingDelete = null
+                    },
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text("取消")
+                }
+            },
+        )
     }
 }
 

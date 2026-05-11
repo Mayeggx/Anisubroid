@@ -136,6 +136,7 @@ class MainActivity : ComponentActivity() {
                             onBatchMatchAuto = vm::batchMatchAuto,
                             onOffsetSubtitle = vm::offsetSubtitle,
                             onBatchOffsetSubtitles = vm::batchOffsetSubtitles,
+                            onStopBatch = vm::stopBatch,
                             onConfirmCandidate = vm::confirmCandidate,
                             onDismissCandidates = vm::dismissCandidates,
                         )
@@ -1056,6 +1057,7 @@ private fun AppScreen(
     onBatchMatchAuto: () -> Unit,
     onOffsetSubtitle: (String, Long) -> Unit,
     onBatchOffsetSubtitles: (Long) -> Unit,
+    onStopBatch: () -> Unit,
     onConfirmCandidate: (Int) -> Unit,
     onDismissCandidates: () -> Unit,
 ) {
@@ -1075,6 +1077,7 @@ private fun AppScreen(
                 onOpenLog = { logVisible = true },
                 onBatchMatchAuto = onBatchMatchAuto,
                 onBatchOffset = { batchOffsetDialogVisible = true },
+                onStopBatch = onStopBatch,
                 onSelectMatchMode = onSelectMatchMode,
                 onSelectSubtitleSource = onSelectSubtitleSource,
                 onSelectSavedFolder = onSelectSavedFolder,
@@ -1182,6 +1185,7 @@ private fun AppTopBar(
     onOpenLog: () -> Unit,
     onBatchMatchAuto: () -> Unit,
     onBatchOffset: () -> Unit,
+    onStopBatch: () -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
     onSelectSubtitleSource: (SubtitleSource) -> Unit,
     onSelectSavedFolder: (Uri) -> Unit,
@@ -1216,6 +1220,7 @@ private fun AppTopBar(
                 batchRunning = batchRunning,
                 onBatchMatchAuto = onBatchMatchAuto,
                 onBatchOffset = onBatchOffset,
+                onStopBatch = onStopBatch,
             )
             MatchModeDropdown(
                 selected = matchMode,
@@ -1239,19 +1244,26 @@ private fun BatchActionDropdown(
     batchRunning: Boolean,
     onBatchMatchAuto: () -> Unit,
     onBatchOffset: () -> Unit,
+    onStopBatch: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var showStopConfirm by remember { mutableStateOf(false) }
     Box {
         TextButton(
-            onClick = { expanded = true },
-            enabled = !batchRunning,
+            onClick = {
+                if (batchRunning) {
+                    showStopConfirm = true
+                } else {
+                    expanded = true
+                }
+            },
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             modifier = Modifier.heightIn(min = 32.dp),
         ) {
             Text(if (batchRunning) "批量中..." else "批量")
         }
         DropdownMenu(
-            expanded = expanded,
+            expanded = expanded && !batchRunning,
             onDismissRequest = { expanded = false },
         ) {
             DropdownMenuItem(
@@ -1269,6 +1281,29 @@ private fun BatchActionDropdown(
                 },
             )
         }
+    }
+    if (showStopConfirm) {
+        AlertDialog(
+            onDismissRequest = { showStopConfirm = false },
+            title = { Text("中断批量任务") },
+            text = { Text("当前正在执行批量匹配/偏移，确认中断吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showStopConfirm = false
+                        expanded = false
+                        onStopBatch()
+                    },
+                ) {
+                    Text("中断")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStopConfirm = false }) {
+                    Text("继续")
+                }
+            },
+        )
     }
 }
 
