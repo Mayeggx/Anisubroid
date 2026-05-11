@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -43,6 +44,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -134,11 +136,13 @@ class MainActivity : ComponentActivity() {
                             onSelectMatchMode = vm::setMatchMode,
                             onMatchSubtitle = vm::matchSubtitle,
                             onBatchMatchAuto = vm::batchMatchAuto,
+                            onBatchDeleteUpToEpisode = vm::batchDeleteUpToEpisode,
                             onOffsetSubtitle = vm::offsetSubtitle,
                             onBatchOffsetSubtitles = vm::batchOffsetSubtitles,
                             onStopBatch = vm::stopBatch,
                             onConfirmCandidate = vm::confirmCandidate,
                             onDismissCandidates = vm::dismissCandidates,
+                            onDeleteVideo = vm::deleteVideo,
                         )
 
                     AppPage.SeedDownload -> VideoDownloadEmbeddedPage()
@@ -215,6 +219,7 @@ data class VideoItem(
     val uri: Uri,
     val folderUri: Uri,
     val title: String,
+    val episode: Int? = null,
     val subtitleStatus: String = "未匹配",
     val matching: Boolean = false,
 )
@@ -257,6 +262,17 @@ enum class SubtitleSource(
     Jimaku("Jimaku"),
     Edatribe("EdaTribe"),
 }
+
+internal fun videosEligibleForEpisodeDelete(
+    videos: List<VideoItem>,
+    maxEpisode: Int,
+): List<VideoItem> =
+    videos.filter { item -> isEpisodeEligibleForDelete(item.episode, maxEpisode) }
+
+internal fun isEpisodeEligibleForDelete(
+    episode: Int?,
+    maxEpisode: Int,
+): Boolean = episode != null && episode <= maxEpisode
 
 enum class MatchMode(
     val label: String,
@@ -444,6 +460,7 @@ class MainViewModel(
                                 uri = item.file.uri,
                                 folderUri = item.parent.uri,
                                 title = title,
+                                episode = SubtitleNameHeuristics.extractEpisode(title),
                                 subtitleStatus = subtitleStatus,
                             )
                         }
@@ -491,8 +508,105 @@ class MainViewModel(
         }
     }
 
+    fun deleteVideo(videoId: String) {
+        val snapshot = _uiState.value
+        if (snapshot.batchRunning || snapshot.loading) return
+        if (snapshot.videos.any { it.matching }) {
+            _uiState.update { it.copy(message = "请等待当前匹配或偏移完成后再删除。") }
+            return
+        }
+        val target = snapshot.videos.firstOrNull { it.id == videoId } ?: return
+        _uiState.update {
+            it.copy(
+                loading = true,
+                message = "正在硬删除：${target.title}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { deleteVideoAndRelatedFiles(target) }
+                .onSuccess { result ->
+                    _uiState.update { state ->
+                        val removedPending = state.pendingVideoId == videoId
+                        state.copy(
+                            loading = false,
+                            videos = state.videos.filterNot { it.id == videoId },
+                            pendingCandidates = if (removedPending) emptyList() else state.pendingCandidates,
+                            pendingVideoId = if (removedPending) null else state.pendingVideoId,
+                            message = buildSingleDeleteMessage(target, result),
+                        )
+                    }
+                }.onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            loading = false,
+                            message = "删除失败：${error.message ?: "未知错误"}",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun batchDeleteUpToEpisode(maxEpisode: Int) {
+        val snapshot = _uiState.value
+        if (snapshot.batchRunning || snapshot.loading) return
+        if (snapshot.videos.any { it.matching }) {
+            _uiState.update { it.copy(message = "请等待当前匹配或偏移完成后再批量删除。") }
+            return
+        }
+        val targets = videosEligibleForEpisodeDelete(snapshot.videos, maxEpisode)
+        if (targets.isEmpty()) {
+            _uiState.update {
+                it.copy(message = "没有匹配到集数小于等于 $maxEpisode 的条目。")
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                loading = true,
+                message = "正在批量硬删除：共 ${targets.size} 个条目（集数 <= $maxEpisode）...",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val deletedIds = LinkedHashSet<String>()
+            var deletedSubtitleCount = 0
+            var subtitleDeleteFailureCount = 0
+            val failedTitles = mutableListOf<String>()
+
+            targets.forEach { item ->
+                runCatching { deleteVideoAndRelatedFiles(item) }
+                    .onSuccess { result ->
+                        deletedIds += item.id
+                        deletedSubtitleCount += result.deletedSubtitleCount
+                        subtitleDeleteFailureCount += result.failedSubtitleNames.size
+                    }.onFailure { error ->
+                        failedTitles += "${item.title}（${error.message ?: "未知错误"}）"
+                    }
+            }
+
+            _uiState.update { state ->
+                val removedPending = state.pendingVideoId?.let { it in deletedIds } == true
+                state.copy(
+                    loading = false,
+                    videos = state.videos.filterNot { it.id in deletedIds },
+                    pendingCandidates = if (removedPending) emptyList() else state.pendingCandidates,
+                    pendingVideoId = if (removedPending) null else state.pendingVideoId,
+                    message = buildBatchDeleteMessage(
+                        maxEpisode = maxEpisode,
+                        successCount = deletedIds.size,
+                        failedTitles = failedTitles,
+                        deletedSubtitleCount = deletedSubtitleCount,
+                        subtitleDeleteFailureCount = subtitleDeleteFailureCount,
+                    ),
+                )
+            }
+        }
+    }
+
     fun matchSubtitle(videoId: String) {
-        if (_uiState.value.batchRunning) return
+        if (_uiState.value.batchRunning || _uiState.value.loading) return
         val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
         val stateSnapshot = _uiState.value
         val source = stateSnapshot.subtitleSource
@@ -527,7 +641,7 @@ class MainViewModel(
     }
 
     fun offsetSubtitle(videoId: String, offsetMillis: Long) {
-        if (_uiState.value.batchRunning) return
+        if (_uiState.value.batchRunning || _uiState.value.loading) return
         val target = _uiState.value.videos.firstOrNull { it.id == videoId } ?: return
         _uiState.update { state ->
             state.copy(
@@ -902,6 +1016,32 @@ class MainViewModel(
         return "偏移成功：$subtitleName（$changedCount 处时间，${formatOffsetLabel(offsetMillis)}）"
     }
 
+    private fun deleteVideoAndRelatedFiles(video: VideoItem): DeleteVideoResult {
+        val videoFile =
+            DocumentFile.fromSingleUri(appContext, video.uri)
+                ?.takeIf { it.isFile }
+                ?: error("无法访问待删除的视频文件。")
+        val subtitleFiles = collectMatchingSubtitleFiles(appContext, video.folderUri, video.title)
+        if (!videoFile.delete()) {
+            error("视频文件删除失败。")
+        }
+
+        var deletedSubtitleCount = 0
+        val failedSubtitleNames = mutableListOf<String>()
+        subtitleFiles.forEach { file ->
+            if (file.delete()) {
+                deletedSubtitleCount += 1
+            } else {
+                failedSubtitleNames += file.name ?: "未知字幕"
+            }
+        }
+
+        return DeleteVideoResult(
+            deletedSubtitleCount = deletedSubtitleCount,
+            failedSubtitleNames = failedSubtitleNames,
+        )
+    }
+
     private fun collectShiftableSubtitleFiles(
         context: Context,
         folderUri: Uri,
@@ -1037,10 +1177,59 @@ class MainViewModel(
         }
     }
 
+    private fun buildSingleDeleteMessage(
+        video: VideoItem,
+        result: DeleteVideoResult,
+    ): String {
+        val suffix =
+            when {
+                result.deletedSubtitleCount > 0 && result.failedSubtitleNames.isEmpty() ->
+                    "，并删除 ${result.deletedSubtitleCount} 个同名字幕。"
+                result.deletedSubtitleCount > 0 ->
+                    "，已删除 ${result.deletedSubtitleCount} 个同名字幕，另有 ${result.failedSubtitleNames.size} 个同名字幕删除失败。"
+                result.failedSubtitleNames.isNotEmpty() ->
+                    "，但有 ${result.failedSubtitleNames.size} 个同名字幕删除失败。"
+                else -> "。"
+            }
+        return "已硬删除：${video.title}$suffix"
+    }
+
+    private fun buildBatchDeleteMessage(
+        maxEpisode: Int,
+        successCount: Int,
+        failedTitles: List<String>,
+        deletedSubtitleCount: Int,
+        subtitleDeleteFailureCount: Int,
+    ): String {
+        val subtitleSummary =
+            buildString {
+                if (deletedSubtitleCount > 0) {
+                    append("，已删除关联字幕 $deletedSubtitleCount 个")
+                }
+                if (subtitleDeleteFailureCount > 0) {
+                    append("，另有 $subtitleDeleteFailureCount 个关联字幕删除失败")
+                }
+            }
+        val failureSummary =
+            if (failedTitles.isEmpty()) {
+                ""
+            } else {
+                val preview = failedTitles.take(3).joinToString("；")
+                val suffix = if (failedTitles.size > 3) "；其余 ${failedTitles.size - 3} 个省略" else ""
+                "，失败 ${failedTitles.size} 个：$preview$suffix"
+            }
+        return "批量硬删除完成：已删除 $successCount 个条目（集数 <= $maxEpisode）$subtitleSummary$failureSummary。"
+    }
+
     private fun baseName(name: String): String {
         val dot = name.lastIndexOf('.')
         return if (dot <= 0) name else name.substring(0, dot)
     }
+
+    private data class DeleteVideoResult(
+        val deletedSubtitleCount: Int,
+        val failedSubtitleNames: List<String>,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1055,17 +1244,22 @@ private fun AppScreen(
     onSelectMatchMode: (MatchMode) -> Unit,
     onMatchSubtitle: (String) -> Unit,
     onBatchMatchAuto: () -> Unit,
+    onBatchDeleteUpToEpisode: (Int) -> Unit,
     onOffsetSubtitle: (String, Long) -> Unit,
     onBatchOffsetSubtitles: (Long) -> Unit,
     onStopBatch: () -> Unit,
     onConfirmCandidate: (Int) -> Unit,
     onDismissCandidates: () -> Unit,
+    onDeleteVideo: (String) -> Unit,
 ) {
     var logVisible by remember { mutableStateOf(false) }
     var folderEditVisible by remember { mutableStateOf(false) }
     var offsetVideo by remember { mutableStateOf<VideoItem?>(null) }
     var batchOffsetDialogVisible by remember { mutableStateOf(false) }
+    var batchDeleteDialogVisible by remember { mutableStateOf(false) }
+    var deleteVideoTarget by remember { mutableStateOf<VideoItem?>(null) }
     val context = LocalContext.current
+    val controlsEnabled = !state.loading && !state.batchRunning && state.videos.none { it.matching }
     Scaffold(
         topBar = {
             AppTopBar(
@@ -1073,9 +1267,11 @@ private fun AppScreen(
                 matchMode = state.matchMode,
                 subtitleSource = state.subtitleSource,
                 batchRunning = state.batchRunning,
+                controlsEnabled = controlsEnabled,
                 folders = state.folderHistory,
                 onOpenLog = { logVisible = true },
                 onBatchMatchAuto = onBatchMatchAuto,
+                onBatchDelete = { batchDeleteDialogVisible = true },
                 onBatchOffset = { batchOffsetDialogVisible = true },
                 onStopBatch = onStopBatch,
                 onSelectMatchMode = onSelectMatchMode,
@@ -1119,6 +1315,8 @@ private fun AppScreen(
                         onMatchSubtitle = { onMatchSubtitle(item.id) },
                         onOffsetSubtitle = { offsetVideo = item },
                         onPlayVideo = { playVideoWithMpv(context, item.uri, item.folderUri, item.title) },
+                        onDeleteVideo = { deleteVideoTarget = item },
+                        controlsEnabled = controlsEnabled,
                     )
                 }
             }
@@ -1149,6 +1347,17 @@ private fun AppScreen(
         )
     }
 
+    deleteVideoTarget?.let { target ->
+        DeleteVideoConfirmDialog(
+            target = target,
+            onDismiss = { deleteVideoTarget = null },
+            onConfirm = {
+                onDeleteVideo(target.id)
+                deleteVideoTarget = null
+            },
+        )
+    }
+
     offsetVideo?.let { target ->
         SubtitleOffsetDialog(
             title = "字幕偏移",
@@ -1157,6 +1366,19 @@ private fun AppScreen(
             onConfirm = { offset ->
                 onOffsetSubtitle(target.id, offset)
                 offsetVideo = null
+            },
+        )
+    }
+
+    if (batchDeleteDialogVisible) {
+        BatchDeleteEpisodeDialog(
+            targetCountForEpisode = { episode ->
+                videosEligibleForEpisodeDelete(state.videos, episode).size
+            },
+            onDismiss = { batchDeleteDialogVisible = false },
+            onConfirm = { episode ->
+                onBatchDeleteUpToEpisode(episode)
+                batchDeleteDialogVisible = false
             },
         )
     }
@@ -1181,9 +1403,11 @@ private fun AppTopBar(
     matchMode: MatchMode,
     subtitleSource: SubtitleSource,
     batchRunning: Boolean,
+    controlsEnabled: Boolean,
     folders: List<SavedFolder>,
     onOpenLog: () -> Unit,
     onBatchMatchAuto: () -> Unit,
+    onBatchDelete: () -> Unit,
     onBatchOffset: () -> Unit,
     onStopBatch: () -> Unit,
     onSelectMatchMode: (MatchMode) -> Unit,
@@ -1217,20 +1441,25 @@ private fun AppTopBar(
                 Text("日志")
             }
             BatchActionDropdown(
+                enabled = controlsEnabled,
                 batchRunning = batchRunning,
                 onBatchMatchAuto = onBatchMatchAuto,
+                onBatchDelete = onBatchDelete,
                 onBatchOffset = onBatchOffset,
                 onStopBatch = onStopBatch,
             )
             MatchModeDropdown(
+                enabled = controlsEnabled,
                 selected = matchMode,
                 onSelect = onSelectMatchMode,
             )
             SubtitleSourceDropdown(
+                enabled = controlsEnabled,
                 selected = subtitleSource,
                 onSelect = onSelectSubtitleSource,
             )
             FolderDropdown(
+                enabled = controlsEnabled,
                 folders = folders,
                 onSelectSavedFolder = onSelectSavedFolder,
                 onEditFolders = onEditFolders,
@@ -1241,8 +1470,10 @@ private fun AppTopBar(
 
 @Composable
 private fun BatchActionDropdown(
+    enabled: Boolean,
     batchRunning: Boolean,
     onBatchMatchAuto: () -> Unit,
+    onBatchDelete: () -> Unit,
     onBatchOffset: () -> Unit,
     onStopBatch: () -> Unit,
 ) {
@@ -1253,10 +1484,11 @@ private fun BatchActionDropdown(
             onClick = {
                 if (batchRunning) {
                     showStopConfirm = true
-                } else {
+                } else if (enabled) {
                     expanded = true
                 }
             },
+            enabled = batchRunning || enabled,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             modifier = Modifier.heightIn(min = 32.dp),
         ) {
@@ -1271,6 +1503,13 @@ private fun BatchActionDropdown(
                 onClick = {
                     expanded = false
                     onBatchMatchAuto()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("批量删除") },
+                onClick = {
+                    expanded = false
+                    onBatchDelete()
                 },
             )
             DropdownMenuItem(
@@ -1369,7 +1608,127 @@ private fun SubtitleOffsetDialog(
 }
 
 @Composable
+private fun BatchDeleteEpisodeDialog(
+    targetCountForEpisode: (Int) -> Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    var episodeInput by remember { mutableStateOf("") }
+    var errorText by remember { mutableStateOf<String?>(null) }
+    var pendingConfirmEpisode by remember { mutableStateOf<Int?>(null) }
+    var pendingConfirmCount by remember { mutableStateOf(0) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("批量删除") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "输入集数后，将根据匹配规则硬删除集数小于等于该值的所有条目，并删除对应视频文件与同名字幕。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = episodeInput,
+                    onValueChange = {
+                        episodeInput = it
+                        errorText = null
+                    },
+                    label = { Text("最大集数（含）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                if (errorText != null) {
+                    Text(
+                        text = errorText.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val parsed = episodeInput.trim().toIntOrNull()
+                    if (parsed == null || parsed <= 0) {
+                        errorText = "请输入大于 0 的集数。"
+                        return@TextButton
+                    }
+                    val count = targetCountForEpisode(parsed)
+                    if (count <= 0) {
+                        errorText = "没有匹配到集数小于等于 $parsed 的条目。"
+                        return@TextButton
+                    }
+                    pendingConfirmEpisode = parsed
+                    pendingConfirmCount = count
+                },
+            ) {
+                Text("下一步")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+
+    if (pendingConfirmEpisode != null) {
+        AlertDialog(
+            onDismissRequest = { pendingConfirmEpisode = null },
+            title = { Text("确认批量删除") },
+            text = {
+                Text("将硬删除 $pendingConfirmCount 个条目（集数 <= $pendingConfirmEpisode），并删除对应视频文件与同名字幕。此操作不可恢复。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val episode = pendingConfirmEpisode ?: return@TextButton
+                        pendingConfirmEpisode = null
+                        onConfirm(episode)
+                    },
+                ) {
+                    Text("确认删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingConfirmEpisode = null }) {
+                    Text("返回")
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun DeleteVideoConfirmDialog(
+    target: VideoItem,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("删除条目") },
+        text = {
+            Text("将硬删除“${target.title}”并删除同名字幕文件。此操作不可恢复，确认继续吗？")
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("确认删除")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
 private fun FolderDropdown(
+    enabled: Boolean,
     folders: List<SavedFolder>,
     onSelectSavedFolder: (Uri) -> Unit,
     onEditFolders: () -> Unit,
@@ -1377,7 +1736,8 @@ private fun FolderDropdown(
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(
-            onClick = { expanded = true },
+            onClick = { if (enabled) expanded = true },
+            enabled = enabled,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             modifier = Modifier.heightIn(min = 32.dp),
         ) {
@@ -1409,13 +1769,15 @@ private fun FolderDropdown(
 
 @Composable
 private fun SubtitleSourceDropdown(
+    enabled: Boolean,
     selected: SubtitleSource,
     onSelect: (SubtitleSource) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(
-            onClick = { expanded = true },
+            onClick = { if (enabled) expanded = true },
+            enabled = enabled,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             modifier = Modifier.heightIn(min = 32.dp),
         ) {
@@ -1491,13 +1853,15 @@ private fun FolderEditDialog(
 
 @Composable
 private fun MatchModeDropdown(
+    enabled: Boolean,
     selected: MatchMode,
     onSelect: (MatchMode) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(
-            onClick = { expanded = true },
+            onClick = { if (enabled) expanded = true },
+            enabled = enabled,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             modifier = Modifier.heightIn(min = 32.dp),
         ) {
@@ -1594,6 +1958,8 @@ private fun VideoRow(
     onMatchSubtitle: () -> Unit,
     onOffsetSubtitle: () -> Unit,
     onPlayVideo: () -> Unit,
+    onDeleteVideo: () -> Unit,
+    controlsEnabled: Boolean,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -1603,7 +1969,7 @@ private fun VideoRow(
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalAlignment = Alignment.Top,
             ) {
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(item.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1613,6 +1979,13 @@ private fun VideoRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                FilledTonalIconButton(
+                    onClick = onDeleteVideo,
+                    enabled = controlsEnabled && !item.matching,
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Text("×")
+                }
             }
 
             Row(
@@ -1621,21 +1994,21 @@ private fun VideoRow(
             ) {
                 Button(
                     onClick = onMatchSubtitle,
-                    enabled = !item.matching,
+                    enabled = controlsEnabled && !item.matching,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(if (item.matching) "匹配中..." else "匹配")
                 }
                 Button(
                     onClick = onOffsetSubtitle,
-                    enabled = !item.matching,
+                    enabled = controlsEnabled && !item.matching,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("偏移")
                 }
                 Button(
                     onClick = onPlayVideo,
-                    enabled = !item.matching,
+                    enabled = controlsEnabled && !item.matching,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("播放")
@@ -1697,24 +2070,38 @@ private fun findMatchingSubtitleFile(
     folderUri: Uri,
     videoTitle: String,
 ): DocumentFile? {
-    val folder = DocumentFile.fromTreeUri(context, folderUri) ?: return null
-    val subDir = folder.findFile("sub")?.takeIf { it.isDirectory } ?: return null
-    val targetBase = stripExtension(videoTitle).lowercase(Locale.ROOT)
     val candidates =
-        subDir
-            .listFiles()
+        collectMatchingSubtitleFiles(context, folderUri, videoTitle)
             .asSequence()
-            .filter { it.isFile }
             .mapNotNull { file ->
                 val name = file.name ?: return@mapNotNull null
                 val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-                if (!isSubtitleExtension(ext)) return@mapNotNull null
-                if (stripExtension(name).lowercase(Locale.ROOT) != targetBase) return@mapNotNull null
                 subtitlePriority(ext) to file
             }
             .sortedBy { it.first }
             .toList()
     return candidates.firstOrNull()?.second
+}
+
+private fun collectMatchingSubtitleFiles(
+    context: android.content.Context,
+    folderUri: Uri,
+    videoTitle: String,
+): List<DocumentFile> {
+    val folder = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
+    val subDir = folder.findFile("sub")?.takeIf { it.isDirectory } ?: return emptyList()
+    val targetBase = stripExtension(videoTitle).lowercase(Locale.ROOT)
+    return subDir
+        .listFiles()
+        .asSequence()
+        .filter { it.isFile }
+        .filter { file ->
+            val name = file.name ?: return@filter false
+            val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+            isSubtitleExtension(ext) && stripExtension(name).lowercase(Locale.ROOT) == targetBase
+        }
+        .sortedBy { it.name?.lowercase(Locale.ROOT).orEmpty() }
+        .toList()
 }
 
 private fun buildClipData(
