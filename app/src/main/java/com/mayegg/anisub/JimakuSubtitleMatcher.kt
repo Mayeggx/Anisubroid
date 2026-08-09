@@ -178,7 +178,7 @@ class JimakuSubtitleMatcher(
         return regex.findAll(html)
             .map {
                 DownloadItem(
-                    url = "https://jimaku.cc${it.groupValues[1]}",
+                    url = buildJimakuDownloadUrl(it.groupValues[1]),
                     name = decodeHtml(it.groupValues[2]),
                 )
             }
@@ -188,26 +188,7 @@ class JimakuSubtitleMatcher(
     private fun scoreEntry(
         entryTitle: String,
         parsed: ParsedVideo,
-    ): Double {
-        val normalizedEntry = SubtitleNameHeuristics.normalize(entryTitle)
-        var best = 0.0
-        for (query in parsed.queryTitles) {
-            val normalizedQuery = SubtitleNameHeuristics.normalize(query)
-            val tokenScore = tokenOverlap(normalizedEntry, normalizedQuery)
-            val containsBonus = when {
-                normalizedEntry.contains(normalizedQuery) -> 0.25
-                normalizedQuery.contains(normalizedEntry) -> 0.12
-                else -> 0.0
-            }
-            best = max(best, tokenScore + containsBonus)
-        }
-
-        val seasonBonus =
-            parsed.season?.let { season ->
-                if (containsSeason(entryTitle, season)) 0.2 else 0.0
-            } ?: 0.0
-        return best + seasonBonus
-    }
+    ): Double = SubtitleNameHeuristics.scoreEntryTitle(entryTitle, parsed)
 
     private fun scoreSubtitleFile(
         parsed: ParsedVideo,
@@ -230,18 +211,8 @@ class JimakuSubtitleMatcher(
                 SubtitleNameHeuristics.normalize(parsed.baseTitle),
             ) * 40.0).toInt()
         val seasonScore =
-            parsed.season?.let { if (containsSeason(fileName, it)) 8 else 0 } ?: 0
+            parsed.season?.let { if (SubtitleNameHeuristics.containsSeason(fileName, it)) 8 else 0 } ?: 0
         return extScore + titleScore + seasonScore
-    }
-
-    private fun containsSeason(
-        text: String,
-        season: Int,
-    ): Boolean {
-        val lower = text.lowercase(Locale.ROOT)
-        return compileRegex("containsSeason:s-season", """\bs(?:eason)?\s*0?$season\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
-            compileRegex("containsSeason:ordinal", """\b$season(?:st|nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
-            compileRegex("containsSeason:part", """\bpart\s*0?$season\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower)
     }
 
     private fun tokenOverlap(
@@ -317,6 +288,31 @@ class JimakuSubtitleMatcher(
     }
 }
 
+internal fun buildJimakuDownloadUrl(href: String): String =
+    "https://jimaku.cc${decodeHtmlAttribute(href)}"
+
+private fun decodeHtmlAttribute(value: String): String {
+    val entityRegex = Regex("""&(#(?:[xX][0-9a-fA-F]+|\d+)|amp|quot|apos|lt|gt);""", RegexOption.IGNORE_CASE)
+    return entityRegex.replace(value) { match ->
+        when (val entity = match.groupValues[1].lowercase(Locale.ROOT)) {
+            "amp" -> "&"
+            "quot" -> "\""
+            "apos" -> "'"
+            "lt" -> "<"
+            "gt" -> ">"
+            else -> {
+                val codePoint =
+                    when {
+                        entity.startsWith("#x") -> entity.removePrefix("#x").toIntOrNull(16)
+                        entity.startsWith("#") -> entity.removePrefix("#").toIntOrNull()
+                        else -> null
+                    }
+                codePoint?.let { String(Character.toChars(it)) } ?: match.value
+            }
+        }
+    }
+}
+
 private data class EntryItem(
     val id: String,
     val title: String,
@@ -343,6 +339,8 @@ object SubtitleNameHeuristics {
             compileRegex("season:ordinal", """\b([1-9]\d?)(?:st|nd|rd|th)\s+Season\b""", RegexOption.IGNORE_CASE),
             compileRegex("season:part", """\bPart\s*0?([1-9]\d?)\b""", RegexOption.IGNORE_CASE),
         )
+    private val romanSeasonRegex =
+        compileRegex("season:roman", """\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b""", RegexOption.IGNORE_CASE)
     private val resolutionLike = setOf(360, 480, 540, 576, 720, 900, 1080, 1440, 2160)
 
     fun parseVideo(name: String): ParsedVideo {
@@ -358,6 +356,7 @@ object SubtitleNameHeuristics {
             queries += "$base Season $season"
             queries += "$base ${ordinal(season)} Season"
             queries += "$base S$season"
+            queries += "$base ${roman(season)}"
         }
         queries += base.replace(compileRegex("parseVideo:removeSeason", """\b\d+(st|nd|rd|th)?\s+season\b""", RegexOption.IGNORE_CASE), "").trim()
 
@@ -410,7 +409,11 @@ object SubtitleNameHeuristics {
             val value = hit.groupValues.getOrNull(1)?.toIntOrNull()
             if (value != null && value in 1..99) return value
         }
-        return null
+        return romanSeasonRegex
+            .find(name)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let(::romanToInt)
     }
 
     fun normalize(text: String): String =
@@ -418,6 +421,54 @@ object SubtitleNameHeuristics {
             .replace(compileRegex("normalize:token", """[^\p{L}\d]+"""), " ")
             .replace(compileRegex("normalize:spaces", """\s+"""), " ")
             .trim()
+
+    internal fun scoreEntryTitle(
+        entryTitle: String,
+        parsed: ParsedVideo,
+    ): Double {
+        val normalizedEntry = normalize(entryTitle)
+        val compactEntry = normalizedEntry.replace(" ", "")
+        var best = 0.0
+        for (query in parsed.queryTitles) {
+            val normalizedQuery = normalize(query)
+            val compactQuery = normalizedQuery.replace(" ", "")
+            val tokenScore = tokenOverlap(normalizedEntry, normalizedQuery)
+            val containsBonus = when {
+                normalizedEntry.contains(normalizedQuery) -> 0.25
+                normalizedQuery.contains(normalizedEntry) -> 0.12
+                else -> 0.0
+            }
+            val compactTitleBonus =
+                if (compactEntry.isNotBlank() && compactEntry == compactQuery) 0.5 else 0.0
+            best = maxOf(best, tokenScore + containsBonus + compactTitleBonus)
+        }
+
+        val seasonAdjustment =
+            parsed.season?.let { requestedSeason ->
+                when (extractSeason(entryTitle)) {
+                    requestedSeason -> 0.2
+                    null -> 0.0
+                    else -> -0.35
+                }
+            } ?: 0.0
+        return best + seasonAdjustment
+    }
+
+    internal fun containsSeason(
+        text: String,
+        season: Int,
+    ): Boolean = extractSeason(text) == season
+
+    private fun tokenOverlap(
+        left: String,
+        right: String,
+    ): Double {
+        val leftTokens = left.split(' ').filter { it.length >= 2 }.toSet()
+        val rightTokens = right.split(' ').filter { it.length >= 2 }.toSet()
+        if (leftTokens.isEmpty() || rightTokens.isEmpty()) return 0.0
+        val inter = leftTokens.intersect(rightTokens).size.toDouble()
+        return inter / rightTokens.size.toDouble()
+    }
 
     private fun cleanBaseTitle(name: String): String {
         var t = name
@@ -454,6 +505,34 @@ object SubtitleNameHeuristics {
             }
         return "$value$suffix"
     }
+
+    private fun roman(value: Int): String =
+        mapOf(
+            1 to "I",
+            2 to "II",
+            3 to "III",
+            4 to "IV",
+            5 to "V",
+            6 to "VI",
+            7 to "VII",
+            8 to "VIII",
+            9 to "IX",
+            10 to "X",
+        )[value] ?: value.toString()
+
+    private fun romanToInt(value: String): Int? =
+        mapOf(
+            "I" to 1,
+            "II" to 2,
+            "III" to 3,
+            "IV" to 4,
+            "V" to 5,
+            "VI" to 6,
+            "VII" to 7,
+            "VIII" to 8,
+            "IX" to 9,
+            "X" to 10,
+        )[value.uppercase(Locale.ROOT)]
 
     private fun compileRegex(
         label: String,

@@ -13,7 +13,13 @@ ensure_local_properties
 
 cd "$PROJECT_ROOT"
 printf '%s\n' "Starting Debug APK build..."
-sh ./gradlew clean assembleDebug --console=plain --stacktrace --no-daemon
+debug_keystore="$PROJECT_ROOT/.local-signing/debug.keystore"
+gradle_args=(clean assembleDebug --console=plain --stacktrace --no-daemon)
+if [[ -f "$debug_keystore" ]]; then
+    printf 'Using imported debug keystore: %s\n' "$debug_keystore"
+    gradle_args+=("-Panisubroid.debug.keystore=$debug_keystore")
+fi
+sh ./gradlew "${gradle_args[@]}"
 
 apk_path="$PROJECT_ROOT/app/build/outputs/apk/debug/app-debug.apk"
 if [[ ! -f "$apk_path" ]]; then

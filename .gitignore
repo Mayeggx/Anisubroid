@@ -24,6 +24,7 @@ logs/
 # Keystore / signing
 *.jks
 *.keystore
+.local-signing/
 
 # Kotlin/Java crash logs
 hs_err_pid*

@@ -14,7 +14,13 @@ if (-not (Test-Path $localPropertiesPath)) {
 Push-Location $projectRoot
 try {
     Write-Output "Starting debug build..."
-    & .\gradlew.bat clean assembleDebug --console=plain --stacktrace --no-daemon
+    $debugKeystorePath = Join-Path $projectRoot ".local-signing\debug.keystore"
+    $gradleArgs = @("clean", "assembleDebug", "--console=plain", "--stacktrace", "--no-daemon")
+    if (Test-Path $debugKeystorePath) {
+        Write-Output "Using imported debug keystore: $debugKeystorePath"
+        $gradleArgs += "-Panisubroid.debug.keystore=$debugKeystorePath"
+    }
+    & .\gradlew.bat @gradleArgs
     $gradleExitCode = $LASTEXITCODE
     if ($gradleExitCode -ne 0) {
         throw "Gradle build failed with exit code: $gradleExitCode"

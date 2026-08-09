@@ -148,19 +148,7 @@ class EdatribeSubtitleMatcher(
         parsed: ParsedVideo,
     ): Double {
         val cleaned = entryName.replace(Regex("""^\s*\[\d+]\s*"""), "")
-        val normalizedEntry = SubtitleNameHeuristics.normalize(cleaned)
-        var best = 0.0
-        for (query in parsed.queryTitles) {
-            val normalizedQuery = SubtitleNameHeuristics.normalize(query)
-            val tokenScore = tokenOverlap(normalizedEntry, normalizedQuery)
-            val containsBonus = when {
-                normalizedEntry.contains(normalizedQuery) -> 0.25
-                normalizedQuery.contains(normalizedEntry) -> 0.12
-                else -> 0.0
-            }
-            best = maxOf(best, tokenScore + containsBonus)
-        }
-        return best
+        return SubtitleNameHeuristics.scoreEntryTitle(cleaned, parsed)
     }
 
     private fun scoreSubtitleFile(fileName: String): Int {

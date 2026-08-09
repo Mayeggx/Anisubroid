@@ -17,6 +17,18 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    val importedDebugKeystore = providers.gradleProperty("anisubroid.debug.keystore").orNull
+    signingConfigs {
+        getByName("debug") {
+            if (!importedDebugKeystore.isNullOrBlank()) {
+                storeFile = file(importedDebugKeystore)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
