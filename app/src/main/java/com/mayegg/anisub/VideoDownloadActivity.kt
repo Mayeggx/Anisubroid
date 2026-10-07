@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -188,7 +187,7 @@ private fun VideoDownloadScreenEmbedded(
                         TextButton(onClick = onPushSubscriptionSync, enabled = !state.syncingConfig) { Text("Push") }
                         TextButton(onClick = { addDialogVisible = true }, enabled = !state.syncingConfig) { Text("添加") }
                     } else {
-                        TextButton(onClick = onRefreshEntries) { Text("刷新") }
+                        RefreshEntriesButton(state = state, onRefreshEntries = onRefreshEntries)
                     }
                 },
             )
@@ -202,11 +201,13 @@ private fun VideoDownloadScreenEmbedded(
                     .padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(
-                text = state.message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (state.message.isNotBlank()) {
+                Text(
+                    text = state.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             if (state.activeSubscriptionId == null) {
                 SubscriptionList(
@@ -215,14 +216,6 @@ private fun VideoDownloadScreenEmbedded(
                     onRemoveSubscription = onRemoveSubscription,
                 )
             } else {
-                if (state.loadingEntries) {
-                    Box(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
-                    }
-                }
                 TorrentEntryList(
                     entries = state.activeEntries,
                     onDownloadTorrent = onDownloadTorrent,
@@ -249,6 +242,7 @@ data class VideoDownloadUiState(
     val activeSubscriptionLabel: String = "",
     val activeEntries: List<TorrentEntryItem> = emptyList(),
     val loadingEntries: Boolean = false,
+    val entriesRefreshFailed: Boolean = false,
     val syncingConfig: Boolean = false,
     val message: String = "请先添加视频订阅链接。",
 )
@@ -312,6 +306,7 @@ class VideoDownloadViewModel(
     val uiState: StateFlow<VideoDownloadUiState> = _uiState.asStateFlow()
 
     private var subscriptions: List<PersistedSubscription> = emptyList()
+    private var entryFetchGeneration = 0L
 
     init {
         subscriptions = readSubscriptions()
@@ -370,6 +365,7 @@ class VideoDownloadViewModel(
                             activeSubscriptionLabel = "",
                             activeEntries = emptyList(),
                             loadingEntries = false,
+                            entriesRefreshFailed = false,
                             message =
                                 if (result.fileFound) {
                                     "Pull 完成：已同步 ${result.syncedCount} 条订阅配置。"
@@ -480,6 +476,7 @@ class VideoDownloadViewModel(
                 activeSubscriptionLabel = if (shouldExitDetail) "" else it.activeSubscriptionLabel,
                 activeEntries = if (shouldExitDetail) emptyList() else it.activeEntries,
                 loadingEntries = false,
+                entriesRefreshFailed = false,
                 message = "已删除订阅：${removed.label}",
             )
         }
@@ -487,71 +484,60 @@ class VideoDownloadViewModel(
 
     fun openSubscription(id: String) {
         val target = subscriptions.firstOrNull { it.id == id } ?: return
+        val generation = ++entryFetchGeneration
         _uiState.update {
             it.copy(
                 activeSubscriptionId = target.id,
                 activeSubscriptionLabel = target.label,
                 loadingEntries = true,
+                entriesRefreshFailed = false,
                 activeEntries = emptyList(),
-                message = "正在加载订阅：${target.label}",
+                message = "",
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
+            fun updateEntries(transform: VideoDownloadUiState.() -> VideoDownloadUiState) {
+                _uiState.update {
+                    if (it.activeSubscriptionId == target.id && generation == entryFetchGeneration) it.transform() else it
+                }
+            }
             val cachedEntries = readCachedEntries(target.id)
             if (cachedEntries.isNotEmpty()) {
-                _uiState.update {
-                    it.copy(
-                        activeEntries = mapToUiEntries(target, cachedEntries),
-                        message = "已加载本地缓存 ${cachedEntries.size} 个条目，正在刷新...",
-                    )
+                updateEntries {
+                    copy(activeEntries = mapToUiEntries(target, cachedEntries))
                 }
             }
             val result = runCatching { fetchEntriesFromSubscription(target.url) }
+            val mappedSubscriptions = subscriptions.map(::toUiSubscription)
             result.fold(
                 onSuccess = { entries ->
                     if (entries.isEmpty() && cachedEntries.isNotEmpty()) {
-                        _uiState.update {
-                            it.copy(
+                        updateEntries {
+                            copy(
                                 loadingEntries = false,
-                                message = "未解析到新条目，沿用本地缓存 ${cachedEntries.size} 个条目。",
-                                subscriptions = subscriptions.map(::toUiSubscription),
+                                subscriptions = mappedSubscriptions,
                             )
                         }
                         return@fold
                     }
-                    val hasCache = cachedEntries.isNotEmpty()
-                    val changed = entries != cachedEntries
-                    if (!hasCache || changed) {
+                    if (entries != cachedEntries) {
                         persistCachedEntries(target.id, entries)
                     }
-                    val mapped = mapToUiEntries(target, entries)
-                    _uiState.update {
-                        it.copy(
+                    updateEntries {
+                        copy(
                             loadingEntries = false,
-                            activeEntries = mapped,
-                            message =
-                                when {
-                                    mapped.isEmpty() -> "未解析到条目。"
-                                    !hasCache -> "已解析到 ${mapped.size} 个条目。"
-                                    !changed -> "无新内容，展示本地缓存 ${mapped.size} 个条目。"
-                                    else -> "发现新内容，已更新 ${mapped.size} 个条目。"
-                                },
-                            subscriptions = subscriptions.map(::toUiSubscription),
+                            activeEntries = mapToUiEntries(target, entries),
+                            subscriptions = mappedSubscriptions,
                         )
                     }
                 },
                 onFailure = { error ->
                     Log.e(TAG, "Open subscription failed: ${target.url}", error)
-                    _uiState.update {
-                        it.copy(
+                    updateEntries {
+                        copy(
                             loadingEntries = false,
-                            activeEntries = if (cachedEntries.isEmpty()) emptyList() else it.activeEntries,
-                            message =
-                                if (cachedEntries.isEmpty()) {
-                                    "解析失败：${error.message ?: "未知错误"}"
-                                } else {
-                                    "刷新失败：${error.message ?: "未知错误"}，展示本地缓存。"
-                                },
+                            entriesRefreshFailed = true,
+                            activeEntries = if (cachedEntries.isEmpty()) emptyList() else activeEntries,
                         )
                     }
                 },
@@ -571,6 +557,7 @@ class VideoDownloadViewModel(
                 activeSubscriptionLabel = "",
                 activeEntries = emptyList(),
                 loadingEntries = false,
+                entriesRefreshFailed = false,
                 message = "请选择一个订阅查看条目。",
                 subscriptions = subscriptions.map(::toUiSubscription),
             )
@@ -1086,7 +1073,7 @@ private fun VideoDownloadScreen(
                         TextButton(onClick = onPushSubscriptionSync, enabled = !state.syncingConfig) { Text("Push") }
                         TextButton(onClick = { addDialogVisible = true }, enabled = !state.syncingConfig) { Text("添加") }
                     } else {
-                        TextButton(onClick = onRefreshEntries) { Text("刷新") }
+                        RefreshEntriesButton(state = state, onRefreshEntries = onRefreshEntries)
                     }
                 },
             )
@@ -1100,11 +1087,13 @@ private fun VideoDownloadScreen(
                     .padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(
-                text = state.message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (state.message.isNotBlank()) {
+                Text(
+                    text = state.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             if (state.activeSubscriptionId == null) {
                 SubscriptionList(
@@ -1113,14 +1102,6 @@ private fun VideoDownloadScreen(
                     onRemoveSubscription = onRemoveSubscription,
                 )
             } else {
-                if (state.loadingEntries) {
-                    Box(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
-                    }
-                }
                 TorrentEntryList(
                     entries = state.activeEntries,
                     onDownloadTorrent = onDownloadTorrent,
@@ -1227,6 +1208,53 @@ private fun SubscriptionList(
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun RefreshEntriesButton(
+    state: VideoDownloadUiState,
+    onRefreshEntries: () -> Unit,
+) {
+    var confirmVisible by remember { mutableStateOf(false) }
+    val label =
+        when {
+            state.loadingEntries -> "刷新中..."
+            state.entriesRefreshFailed -> "刷新失败"
+            else -> "刷新"
+        }
+    TextButton(
+        onClick = {
+            if (state.loadingEntries || state.entriesRefreshFailed) {
+                confirmVisible = true
+            } else {
+                onRefreshEntries()
+            }
+        },
+    ) {
+        Text(label)
+    }
+    if (confirmVisible) {
+        AlertDialog(
+            onDismissRequest = { confirmVisible = false },
+            title = { Text("刷新条目") },
+            text = { Text("是否重新拉取最新的条目列表？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmVisible = false
+                        onRefreshEntries()
+                    },
+                ) {
+                    Text("确认")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmVisible = false }) {
                     Text("取消")
                 }
             },
