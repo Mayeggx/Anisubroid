@@ -1921,7 +1921,7 @@ private fun LogDialog(
 }
 
 @Composable
-private fun CandidateDialog(
+internal fun CandidateDialog(
     candidates: List<SubtitleCandidate>,
     onDismiss: () -> Unit,
     onSelect: (Int) -> Unit,

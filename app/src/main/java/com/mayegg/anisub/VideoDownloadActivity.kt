@@ -101,6 +101,8 @@ class VideoDownloadActivity : ComponentActivity() {
                 onMatchVideo = vm::matchDownloadedVideo,
                 onOffsetVideo = vm::offsetDownloadedVideo,
                 onDeleteVideo = vm::deleteDownloadedVideo,
+        onConfirmCandidate = vm::confirmCandidate,
+        onDismissCandidates = vm::dismissCandidates,
             )
         }
     }
@@ -133,6 +135,8 @@ fun VideoDownloadPage() {
         onMatchVideo = vm::matchDownloadedVideo,
         onOffsetVideo = vm::offsetDownloadedVideo,
         onDeleteVideo = vm::deleteDownloadedVideo,
+        onConfirmCandidate = vm::confirmCandidate,
+        onDismissCandidates = vm::dismissCandidates,
     )
 }
 
@@ -162,6 +166,8 @@ fun VideoDownloadEmbeddedPage() {
         onMatchVideo = vm::matchDownloadedVideo,
         onOffsetVideo = vm::offsetDownloadedVideo,
         onDeleteVideo = vm::deleteDownloadedVideo,
+        onConfirmCandidate = vm::confirmCandidate,
+        onDismissCandidates = vm::dismissCandidates,
     )
 }
 
@@ -203,6 +209,8 @@ private fun VideoDownloadScreenEmbedded(
     onMatchVideo: (String) -> Unit,
     onOffsetVideo: (String, Long) -> Unit,
     onDeleteVideo: (String) -> Unit,
+    onConfirmCandidate: (Int) -> Unit,
+    onDismissCandidates: () -> Unit,
 ) {
     var addDialogVisible by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
@@ -318,6 +326,14 @@ private fun VideoDownloadScreenEmbedded(
             onDismiss = { settingsVisible = false },
         )
     }
+
+    if (state.pendingCandidates.isNotEmpty()) {
+        CandidateDialog(
+            candidates = state.pendingCandidates,
+            onDismiss = onDismissCandidates,
+            onSelect = onConfirmCandidate,
+        )
+    }
 }
 
 data class VideoDownloadUiState(
@@ -334,6 +350,8 @@ data class VideoDownloadUiState(
     val deletingVideo: Boolean = false,
     val videoFolderUri: String = "",
     val videoFolderLabel: String = "",
+    val pendingCandidates: List<SubtitleCandidate> = emptyList(),
+    val pendingVideoId: String? = null,
     val syncingConfig: Boolean = false,
     val message: String = "请先添加视频订阅链接。",
 )
@@ -630,6 +648,8 @@ class VideoDownloadViewModel(
                 loadingVideos = false,
                 videosLoadFailed = false,
                 deletingVideo = false,
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
                 message = "",
             )
         }
@@ -765,6 +785,8 @@ class VideoDownloadViewModel(
                 loadingEntries = false,
                 entriesRefreshFailed = false,
                 deletingVideo = false,
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
                 message = "",
             )
         }
@@ -870,14 +892,29 @@ class VideoDownloadViewModel(
 
         viewModelScope.launch(Dispatchers.IO) {
             val output =
-                runCatching { jimakuMatcher.matchAndDownload(target) }
-                    .fold(
-                        onSuccess = { "匹配成功：${it.savedFileName}" },
-                        onFailure = { error ->
-                            Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
-                            "匹配失败：${error.message ?: "未知错误"}"
-                        },
-                    )
+                runCatching {
+                    val candidates = jimakuMatcher.findCandidates(target).take(8)
+                    when {
+                        candidates.isEmpty() -> "匹配失败：未找到候选字幕。"
+                        candidates.size == 1 -> {
+                            val result = jimakuMatcher.downloadCandidate(target, candidates.first())
+                            "匹配成功：${result.savedFileName}"
+                        }
+                        else -> {
+                            _uiState.update { state ->
+                                state.copy(
+                                    pendingCandidates = candidates,
+                                    pendingVideoId = videoId,
+                                    message = "找到 ${candidates.size} 个候选字幕，请确认。",
+                                )
+                            }
+                            "找到 ${candidates.size} 个候选字幕，请确认。"
+                        }
+                    }
+                }.getOrElse { error ->
+                    Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
+                    "匹配失败：${error.message ?: "未知错误"}"
+                }
             _uiState.update { state ->
                 state.copy(
                     activeVideos =
@@ -887,6 +924,56 @@ class VideoDownloadViewModel(
                     message = output,
                 )
             }
+        }
+    }
+
+    fun confirmCandidate(index: Int) {
+        val state = _uiState.value
+        val videoId = state.pendingVideoId ?: return
+        val video = state.activeVideos.firstOrNull { it.id == videoId } ?: return
+        val candidate = state.pendingCandidates.getOrNull(index) ?: return
+
+        _uiState.update {
+            it.copy(
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
+                activeVideos =
+                    it.activeVideos.map { item ->
+                        if (item.id == videoId) item.copy(subtitleStatus = "正在下载候选字幕...", matching = true) else item
+                    },
+                message = "正在下载已选候选字幕：${candidate.originalSubtitleName}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val output =
+                runCatching { jimakuMatcher.downloadCandidate(video, candidate) }
+                    .fold(
+                        onSuccess = { result -> "匹配成功：${result.savedFileName}" },
+                        onFailure = { error ->
+                            Log.e(TAG, "Candidate download failed for: ${video.title}", error)
+                            "匹配失败：${error.message ?: "未知错误"}"
+                        },
+                    )
+            _uiState.update {
+                it.copy(
+                    activeVideos =
+                        it.activeVideos.map { item ->
+                            if (item.id == videoId) item.copy(subtitleStatus = output, matching = false) else item
+                        },
+                    message = output,
+                )
+            }
+        }
+    }
+
+    fun dismissCandidates() {
+        _uiState.update {
+            it.copy(
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
+                message = "已取消候选选择。",
+            )
         }
     }
 
@@ -953,9 +1040,12 @@ class VideoDownloadViewModel(
                         )
                     }
                     _uiState.update { state ->
+                        val removedPending = state.pendingVideoId == videoId
                         state.copy(
                             deletingVideo = false,
                             activeVideos = state.activeVideos.filterNot { it.id == videoId },
+                            pendingCandidates = if (removedPending) emptyList() else state.pendingCandidates,
+                            pendingVideoId = if (removedPending) null else state.pendingVideoId,
                             message = buildDeletedVideoMessage(target, result),
                         )
                     }
@@ -1033,6 +1123,8 @@ class VideoDownloadViewModel(
                 loadingVideos = false,
                 videosLoadFailed = false,
                 deletingVideo = false,
+                pendingCandidates = emptyList(),
+                pendingVideoId = null,
                 message = "请选择一个订阅查看条目。",
                 subscriptions = subscriptions.map(::toUiSubscription),
             )
@@ -1634,6 +1726,8 @@ private fun VideoDownloadScreen(
     onMatchVideo: (String) -> Unit,
     onOffsetVideo: (String, Long) -> Unit,
     onDeleteVideo: (String) -> Unit,
+    onConfirmCandidate: (Int) -> Unit,
+    onDismissCandidates: () -> Unit,
 ) {
     var addDialogVisible by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
@@ -1749,6 +1843,14 @@ private fun VideoDownloadScreen(
             onSave = onSaveVideoFolder,
             onRequestGrant = { initial -> videoFolderLauncher.launch(initial) },
             onDismiss = { settingsVisible = false },
+        )
+    }
+
+    if (state.pendingCandidates.isNotEmpty()) {
+        CandidateDialog(
+            candidates = state.pendingCandidates,
+            onDismiss = onDismissCandidates,
+            onSelect = onConfirmCandidate,
         )
     }
 }
