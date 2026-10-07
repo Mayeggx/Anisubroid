@@ -288,6 +288,7 @@ class VideoDownloadViewModel(
         private const val TAG = "VideoDownload"
         private const val PREF_NAME = "anisubroid_video_download"
         private const val KEY_SUBSCRIPTIONS = "subscriptions"
+        private const val KEY_ENTRY_CACHE_PREFIX = "entry_cache_"
         private const val ROW_SEPARATOR = "\n"
         private const val FIELD_SEPARATOR = "\t"
         private const val DOWNLOAD_ROOT = "video_subscriptions"
@@ -469,6 +470,7 @@ class VideoDownloadViewModel(
         val removed = subscriptions.firstOrNull { it.id == id } ?: return
         subscriptions = subscriptions.filterNot { it.id == id }
         persistSubscriptions()
+        prefs.edit().remove(entryCacheKey(id)).apply()
         val current = _uiState.value
         val shouldExitDetail = current.activeSubscriptionId == id
         _uiState.update {
@@ -491,31 +493,49 @@ class VideoDownloadViewModel(
                 activeSubscriptionLabel = target.label,
                 loadingEntries = true,
                 activeEntries = emptyList(),
-                message = "正在解析订阅：${target.label}",
+                message = "正在加载订阅：${target.label}",
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
+            val cachedEntries = readCachedEntries(target.id)
+            if (cachedEntries.isNotEmpty()) {
+                _uiState.update {
+                    it.copy(
+                        activeEntries = mapToUiEntries(target, cachedEntries),
+                        message = "已加载本地缓存 ${cachedEntries.size} 个条目，正在刷新...",
+                    )
+                }
+            }
             val result = runCatching { fetchEntriesFromSubscription(target.url) }
             result.fold(
                 onSuccess = { entries ->
-                    val folder = ensureSubscriptionFolder(target)
-                    val mapped =
-                        entries.map { entry ->
-                            val localFile = File(folder, torrentFileName(entry))
-                            TorrentEntryItem(
-                                id = entry.id,
-                                title = entry.title,
-                                sizeText = entry.sizeText,
-                                uploadText = entry.uploadText,
-                                downloadUrl = entry.downloadUrl,
-                                localFilePath = localFile.takeIf { it.exists() }?.absolutePath,
+                    if (entries.isEmpty() && cachedEntries.isNotEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                loadingEntries = false,
+                                message = "未解析到新条目，沿用本地缓存 ${cachedEntries.size} 个条目。",
+                                subscriptions = subscriptions.map(::toUiSubscription),
                             )
                         }
+                        return@fold
+                    }
+                    val hasCache = cachedEntries.isNotEmpty()
+                    val changed = entries != cachedEntries
+                    if (!hasCache || changed) {
+                        persistCachedEntries(target.id, entries)
+                    }
+                    val mapped = mapToUiEntries(target, entries)
                     _uiState.update {
                         it.copy(
                             loadingEntries = false,
                             activeEntries = mapped,
-                            message = if (mapped.isEmpty()) "未解析到条目。" else "已解析到 ${mapped.size} 个条目。",
+                            message =
+                                when {
+                                    mapped.isEmpty() -> "未解析到条目。"
+                                    !hasCache -> "已解析到 ${mapped.size} 个条目。"
+                                    !changed -> "无新内容，展示本地缓存 ${mapped.size} 个条目。"
+                                    else -> "发现新内容，已更新 ${mapped.size} 个条目。"
+                                },
                             subscriptions = subscriptions.map(::toUiSubscription),
                         )
                     }
@@ -525,8 +545,13 @@ class VideoDownloadViewModel(
                     _uiState.update {
                         it.copy(
                             loadingEntries = false,
-                            activeEntries = emptyList(),
-                            message = "解析失败：${error.message ?: "未知错误"}",
+                            activeEntries = if (cachedEntries.isEmpty()) emptyList() else it.activeEntries,
+                            message =
+                                if (cachedEntries.isEmpty()) {
+                                    "解析失败：${error.message ?: "未知错误"}"
+                                } else {
+                                    "刷新失败：${error.message ?: "未知错误"}，展示本地缓存。"
+                                },
                         )
                     }
                 },
@@ -607,6 +632,24 @@ class VideoDownloadViewModel(
         }
     }
 
+    private fun mapToUiEntries(
+        subscription: PersistedSubscription,
+        entries: List<ParsedTorrentEntry>,
+    ): List<TorrentEntryItem> {
+        val folder = ensureSubscriptionFolder(subscription)
+        return entries.map { entry ->
+            val localFile = File(folder, torrentFileName(entry))
+            TorrentEntryItem(
+                id = entry.id,
+                title = entry.title,
+                sizeText = entry.sizeText,
+                uploadText = entry.uploadText,
+                downloadUrl = entry.downloadUrl,
+                localFilePath = localFile.takeIf { it.exists() }?.absolutePath,
+            )
+        }
+    }
+
     private fun toUiSubscription(item: PersistedSubscription): VideoSubscriptionItem {
         val folder = ensureSubscriptionFolder(item)
         val count =
@@ -649,6 +692,41 @@ class VideoDownloadViewModel(
                 )
             }
             .toList()
+    }
+
+    private fun entryCacheKey(subscriptionId: String): String = "$KEY_ENTRY_CACHE_PREFIX$subscriptionId"
+
+    private fun readCachedEntries(subscriptionId: String): List<ParsedTorrentEntry> {
+        val raw = prefs.getString(entryCacheKey(subscriptionId), "").orEmpty()
+        if (raw.isBlank()) return emptyList()
+        return raw.split(ROW_SEPARATOR)
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { row ->
+                val parts = row.split(FIELD_SEPARATOR, limit = 5)
+                if (parts.size != 5) return@mapNotNull null
+                ParsedTorrentEntry(
+                    id = Uri.decode(parts[0]),
+                    title = Uri.decode(parts[1]),
+                    sizeText = Uri.decode(parts[2]),
+                    uploadText = Uri.decode(parts[3]),
+                    downloadUrl = Uri.decode(parts[4]),
+                )
+            }
+            .toList()
+    }
+
+    private fun persistCachedEntries(
+        subscriptionId: String,
+        entries: List<ParsedTorrentEntry>,
+    ) {
+        val payload =
+            entries.joinToString(ROW_SEPARATOR) { entry ->
+                listOf(entry.id, entry.title, entry.sizeText, entry.uploadText, entry.downloadUrl)
+                    .joinToString(FIELD_SEPARATOR) { Uri.encode(it) }
+            }
+        prefs.edit().putString(entryCacheKey(subscriptionId), payload).apply()
     }
 
     private fun fetchEntriesFromSubscription(url: String): List<ParsedTorrentEntry> {
