@@ -72,7 +72,7 @@ Debug APK 的签名 keystore 按以下优先级选取：
 1. 项目内 `.local-signing/debug.keystore`——`scripts/`、`mac-scripts/`、`wsl-scripts/` 三套脚本检测到它都会自动传入 `-Panisubroid.debug.keystore`，**推荐**；
 2. 否则用系统默认 debug keystore：WSL 为 `~/.android/debug.keystore`，Windows 为 `ANDROID_USER_HOME` 下的 `debug.keystore`（本机 `scripts/use-e-drive-android-env.ps1` 把它设为 `E:\Android\UserHome`，**不是** `C:\Users\<你>\.android`）。
 
-这意味着不同设备使用各自的默认 keystore 时，构建出的包签名不同，互相覆盖安装会报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。因此本仓库**直接提交了**统一的 `.local-signing/debug.keystore`，各设备克隆即用（debug 证书不含真实身份；公开后他人也能签出同签名的包，仅用于本项目内部开发，风险自担）。
+这意味着不同设备使用各自的默认 keystore 时，构建出的包签名不同，互相覆盖安装会报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。因此本仓库**直接提交了**统一的 keystore：文件位于**仓库根目录下以点开头的隐藏目录** `.local-signing/` 中，完整相对路径为 `.local-signing/debug.keystore`（本机即 `E:\Mega\Anisubroid\.local-signing\debug.keystore`，Windows 资源管理器需显示隐藏文件才可见），各设备克隆即用（debug 证书不含真实身份；公开后他人也能签出同签名的包，仅用于本项目内部开发，风险自担）。
 
 `.gitignore` 中 `*.keystore`、`.local-signing/` 规则仍然生效，仅用于防止其他密钥文件被误提交，不影响本文件。如要更换 keystore，覆盖该文件后重新构建即可，无需卸载手机上的旧包，应用数据保留。
 
