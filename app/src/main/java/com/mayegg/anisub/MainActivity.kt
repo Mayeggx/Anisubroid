@@ -97,7 +97,7 @@ class MainActivity : ComponentActivity() {
             val vm: MainViewModel = viewModel()
             val state by vm.uiState.collectAsStateWithLifecycle()
             var folderPickMode by remember { mutableStateOf(FolderPickMode.OpenAndLoad) }
-            var currentPage by rememberSaveable { mutableStateOf(AppPage.SubtitleMatch) }
+            var currentPage by rememberSaveable { mutableStateOf(AppPage.SeedDownload) }
             var sidebarVisible by rememberSaveable { mutableStateOf(false) }
             var aboutVisible by rememberSaveable { mutableStateOf(false) }
             var wordNoteOpenFolderUri by rememberSaveable { mutableStateOf<String?>(null) }
@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
 
             val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 uri?.let {
-                    persistReadWritePermission(it)
+                    persistTreeReadWritePermission(this@MainActivity, it)
                     when (folderPickMode) {
                         FolderPickMode.OpenAndLoad -> vm.loadFolder(this, it)
                         FolderPickMode.AddOnly -> vm.addFolder(this, it)
@@ -194,22 +194,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun persistReadWritePermission(uri: Uri) {
-        try {
-            contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-            )
-        } catch (_: SecurityException) {
-        }
+}
+
+internal fun persistTreeReadWritePermission(
+    context: Context,
+    uri: Uri,
+) {
+    try {
+        context.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+        )
+    } catch (_: SecurityException) {
     }
 }
 
 private enum class AppPage(
     val label: String,
 ) {
+    SeedDownload("种子条目"),
     SubtitleMatch("字幕匹配"),
-    SeedDownload("种子下载"),
     WordNote("单词摘记"),
     RemoteSync("远程同步"),
 }
@@ -450,7 +454,7 @@ class MainViewModel(
                         scanned.map { item ->
                             val title = item.file.name ?: item.file.uri.lastPathSegment.orEmpty()
                             val subtitleStatus =
-                                if (subtitleBases.contains(baseName(title).lowercase(Locale.ROOT))) {
+                                if (subtitleBases.contains(stripExtension(title).lowercase(Locale.ROOT))) {
                                     "已存在对应字幕"
                                 } else {
                                     "未匹配"
@@ -524,7 +528,7 @@ class MainViewModel(
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { deleteVideoAndRelatedFiles(target) }
+            runCatching { deleteVideoAndRelatedFiles(appContext, target) }
                 .onSuccess { result ->
                     _uiState.update { state ->
                         val removedPending = state.pendingVideoId == videoId
@@ -576,7 +580,7 @@ class MainViewModel(
             val failedTitles = mutableListOf<String>()
 
             targets.forEach { item ->
-                runCatching { deleteVideoAndRelatedFiles(item) }
+                runCatching { deleteVideoAndRelatedFiles(appContext, item) }
                     .onSuccess { result ->
                         deletedIds += item.id
                         deletedSubtitleCount += result.deletedSubtitleCount
@@ -1016,32 +1020,6 @@ class MainViewModel(
         return "偏移成功：$subtitleName（$changedCount 处时间，${formatOffsetLabel(offsetMillis)}）"
     }
 
-    private fun deleteVideoAndRelatedFiles(video: VideoItem): DeleteVideoResult {
-        val videoFile =
-            DocumentFile.fromSingleUri(appContext, video.uri)
-                ?.takeIf { it.isFile }
-                ?: error("无法访问待删除的视频文件。")
-        val subtitleFiles = collectMatchingSubtitleFiles(appContext, video.folderUri, video.title)
-        if (!videoFile.delete()) {
-            error("视频文件删除失败。")
-        }
-
-        var deletedSubtitleCount = 0
-        val failedSubtitleNames = mutableListOf<String>()
-        subtitleFiles.forEach { file ->
-            if (file.delete()) {
-                deletedSubtitleCount += 1
-            } else {
-                failedSubtitleNames += file.name ?: "未知字幕"
-            }
-        }
-
-        return DeleteVideoResult(
-            deletedSubtitleCount = deletedSubtitleCount,
-            failedSubtitleNames = failedSubtitleNames,
-        )
-    }
-
     private fun collectShiftableSubtitleFiles(
         context: Context,
         folderUri: Uri,
@@ -1060,32 +1038,6 @@ class MainViewModel(
             .toList()
     }
 
-    private fun applyOffsetToSubtitleFile(
-        context: Context,
-        subtitleFile: DocumentFile,
-        offsetMillis: Long,
-    ): Int {
-        val fileName = subtitleFile.name ?: error("字幕文件名为空。")
-        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-        val sourceText =
-            context.contentResolver.openInputStream(subtitleFile.uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: error("无法读取字幕文件：$fileName")
-        val shifted =
-            when (ext) {
-                "srt" -> shiftSrtSubtitleContent(sourceText, offsetMillis)
-                "ass", "ssa" -> shiftAssSubtitleContent(sourceText, offsetMillis)
-                else -> error("不支持的字幕格式：$ext")
-            }
-        if (shifted.changedCount <= 0) {
-            error("文件中未找到可偏移的时间字段。")
-        }
-
-        context.contentResolver.openOutputStream(subtitleFile.uri, "rwt")?.bufferedWriter(Charsets.UTF_8)?.use {
-            it.write(shifted.content)
-        } ?: error("无法写入字幕文件：$fileName")
-        return shifted.changedCount
-    }
-
     private fun addFolderInternal(context: Context, treeUri: Uri) {
         val label = resolveFolderLabel(context, treeUri)
         val old = readFolderHistory().filterNot { it.uri.toString() == treeUri.toString() }
@@ -1101,7 +1053,7 @@ class MainViewModel(
     private fun collectVideoFiles(context: Context, treeUri: Uri): List<ScannedVideo> {
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
         return root.listFiles()
-            .filter { it.isFile && isVideo(it) }
+            .filter { it.isFile && isVideoFile(it) }
             .map { ScannedVideo(file = it, parent = root) }
     }
 
@@ -1127,42 +1079,6 @@ class MainViewModel(
         val file: DocumentFile,
         val parent: DocumentFile,
     )
-
-    private fun isVideo(file: DocumentFile): Boolean {
-        if (file.type?.startsWith("video/") == true) return true
-        val lower = file.name?.lowercase(Locale.ROOT) ?: return false
-        return lower.endsWith(".mp4") ||
-            lower.endsWith(".mkv") ||
-            lower.endsWith(".avi") ||
-            lower.endsWith(".mov") ||
-            lower.endsWith(".wmv") ||
-            lower.endsWith(".flv") ||
-            lower.endsWith(".webm") ||
-            lower.endsWith(".m4v")
-    }
-
-    private fun collectExistingSubtitleBaseNames(parent: DocumentFile?): Set<String> {
-        if (parent == null || !parent.isDirectory) return emptySet()
-        val subDir = parent.findFile("sub") ?: return emptySet()
-        if (!subDir.isDirectory) return emptySet()
-        return subDir.listFiles()
-            .asSequence()
-            .filter { it.isFile }
-            .mapNotNull { file ->
-                val name = file.name ?: return@mapNotNull null
-                if (!isSubtitleFileName(name)) return@mapNotNull null
-                baseName(name).lowercase(Locale.ROOT)
-            }
-            .toSet()
-    }
-
-    private fun isSubtitleFileName(name: String): Boolean {
-        val lower = name.lowercase(Locale.ROOT)
-        return lower.endsWith(".srt") ||
-            lower.endsWith(".ass") ||
-            lower.endsWith(".ssa") ||
-            lower.endsWith(".vtt")
-    }
 
     private fun hasExistingSubtitle(
         context: Context,
@@ -1221,15 +1137,102 @@ class MainViewModel(
         return "批量硬删除完成：已删除 $successCount 个条目（集数 <= $maxEpisode）$subtitleSummary$failureSummary。"
     }
 
-    private fun baseName(name: String): String {
-        val dot = name.lastIndexOf('.')
-        return if (dot <= 0) name else name.substring(0, dot)
+}
+
+internal data class DeleteVideoResult(
+    val deletedSubtitleCount: Int,
+    val failedSubtitleNames: List<String>,
+)
+
+internal fun deleteVideoAndRelatedFiles(
+    context: Context,
+    video: VideoItem,
+): DeleteVideoResult {
+    val videoFile =
+        DocumentFile.fromSingleUri(context, video.uri)
+            ?.takeIf { it.isFile }
+            ?: error("无法访问待删除的视频文件。")
+    val subtitleFiles = collectMatchingSubtitleFiles(context, video.folderUri, video.title)
+    if (!videoFile.delete()) {
+        error("视频文件删除失败。")
     }
 
-    private data class DeleteVideoResult(
-        val deletedSubtitleCount: Int,
-        val failedSubtitleNames: List<String>,
+    var deletedSubtitleCount = 0
+    val failedSubtitleNames = mutableListOf<String>()
+    subtitleFiles.forEach { file ->
+        if (file.delete()) {
+            deletedSubtitleCount += 1
+        } else {
+            failedSubtitleNames += file.name ?: "未知字幕"
+        }
+    }
+
+    return DeleteVideoResult(
+        deletedSubtitleCount = deletedSubtitleCount,
+        failedSubtitleNames = failedSubtitleNames,
     )
+}
+
+internal fun applyOffsetToSubtitleFile(
+    context: Context,
+    subtitleFile: DocumentFile,
+    offsetMillis: Long,
+): Int {
+    val fileName = subtitleFile.name ?: error("字幕文件名为空。")
+    val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+    val sourceText =
+        context.contentResolver.openInputStream(subtitleFile.uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            ?: error("无法读取字幕文件：$fileName")
+    val shifted =
+        when (ext) {
+            "srt" -> shiftSrtSubtitleContent(sourceText, offsetMillis)
+            "ass", "ssa" -> shiftAssSubtitleContent(sourceText, offsetMillis)
+            else -> error("不支持的字幕格式：$ext")
+        }
+    if (shifted.changedCount <= 0) {
+        error("文件中未找到可偏移的时间字段。")
+    }
+
+    context.contentResolver.openOutputStream(subtitleFile.uri, "rwt")?.bufferedWriter(Charsets.UTF_8)?.use {
+        it.write(shifted.content)
+    } ?: error("无法写入字幕文件：$fileName")
+    return shifted.changedCount
+}
+
+internal fun isVideoFile(file: DocumentFile): Boolean {
+    if (file.type?.startsWith("video/") == true) return true
+    val lower = file.name?.lowercase(Locale.ROOT) ?: return false
+    return lower.endsWith(".mp4") ||
+        lower.endsWith(".mkv") ||
+        lower.endsWith(".avi") ||
+        lower.endsWith(".mov") ||
+        lower.endsWith(".wmv") ||
+        lower.endsWith(".flv") ||
+        lower.endsWith(".webm") ||
+        lower.endsWith(".m4v")
+}
+
+internal fun collectExistingSubtitleBaseNames(parent: DocumentFile?): Set<String> {
+    if (parent == null || !parent.isDirectory) return emptySet()
+    val subDir = parent.findFile("sub") ?: return emptySet()
+    if (!subDir.isDirectory) return emptySet()
+    return subDir.listFiles()
+        .asSequence()
+        .filter { it.isFile }
+        .mapNotNull { file ->
+            val name = file.name ?: return@mapNotNull null
+            if (!isSubtitleFileName(name)) return@mapNotNull null
+            stripExtension(name).lowercase(Locale.ROOT)
+        }
+        .toSet()
+}
+
+internal fun isSubtitleFileName(name: String): Boolean {
+    val lower = name.lowercase(Locale.ROOT)
+    return lower.endsWith(".srt") ||
+        lower.endsWith(".ass") ||
+        lower.endsWith(".ssa") ||
+        lower.endsWith(".vtt")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1547,7 +1550,7 @@ private fun BatchActionDropdown(
 }
 
 @Composable
-private fun SubtitleOffsetDialog(
+internal fun SubtitleOffsetDialog(
     title: String,
     description: String,
     onDismiss: () -> Unit,
@@ -1702,7 +1705,7 @@ private fun BatchDeleteEpisodeDialog(
 }
 
 @Composable
-private fun DeleteVideoConfirmDialog(
+internal fun DeleteVideoConfirmDialog(
     target: VideoItem,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
@@ -1953,7 +1956,7 @@ private fun CandidateDialog(
 }
 
 @Composable
-private fun VideoRow(
+internal fun VideoRow(
     item: VideoItem,
     onMatchSubtitle: () -> Unit,
     onOffsetSubtitle: () -> Unit,
@@ -2018,7 +2021,7 @@ private fun VideoRow(
     }
 }
 
-private fun playVideoWithMpv(
+internal fun playVideoWithMpv(
     context: android.content.Context,
     uri: Uri,
     folderUri: Uri,
@@ -2065,7 +2068,7 @@ private fun findMatchingSubtitleUri(
     videoTitle: String,
 ): Uri? = findMatchingSubtitleFile(context, folderUri, videoTitle)?.uri
 
-private fun findMatchingSubtitleFile(
+internal fun findMatchingSubtitleFile(
     context: android.content.Context,
     folderUri: Uri,
     videoTitle: String,
@@ -2152,7 +2155,7 @@ private fun subtitlePriority(ext: String): Int =
         else -> Int.MAX_VALUE
     }
 
-private fun stripExtension(name: String): String {
+internal fun stripExtension(name: String): String {
     val dot = name.lastIndexOf('.')
     return if (dot <= 0) name else name.substring(0, dot)
 }
@@ -2252,7 +2255,7 @@ private fun formatAssTimestamp(totalMillis: Long): String {
     return String.format(Locale.US, "%d:%02d:%02d.%02d", hours, minutes, seconds, centis)
 }
 
-private fun formatOffsetLabel(offsetMillis: Long): String =
+internal fun formatOffsetLabel(offsetMillis: Long): String =
     if (offsetMillis >= 0) "+${offsetMillis}ms" else "${offsetMillis}ms"
 
 private fun episodeLabel(episode: Int?): String = if (episode == null) "电影" else "第${episode}集"

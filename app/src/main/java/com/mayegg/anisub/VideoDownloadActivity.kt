@@ -6,10 +6,13 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,12 +21,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -42,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.core.text.HtmlCompat
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -88,6 +94,13 @@ class VideoDownloadActivity : ComponentActivity() {
                     val message = openTorrentFile(context, path)
                     if (message != null) vm.setMessage(message)
                 },
+                onOpenVideos = vm::openSubscriptionVideos,
+                onRescanVideos = vm::rescanActiveVideos,
+                onSaveVideoFolder = vm::saveVideoFolderInput,
+                onVideoFolderPicked = vm::savePickedVideoFolder,
+                onMatchVideo = vm::matchDownloadedVideo,
+                onOffsetVideo = vm::offsetDownloadedVideo,
+                onDeleteVideo = vm::deleteDownloadedVideo,
             )
         }
     }
@@ -113,6 +126,13 @@ fun VideoDownloadPage() {
             val message = openTorrentFile(context, path)
             if (message != null) vm.setMessage(message)
         },
+        onOpenVideos = vm::openSubscriptionVideos,
+        onRescanVideos = vm::rescanActiveVideos,
+        onSaveVideoFolder = vm::saveVideoFolderInput,
+        onVideoFolderPicked = vm::savePickedVideoFolder,
+        onMatchVideo = vm::matchDownloadedVideo,
+        onOffsetVideo = vm::offsetDownloadedVideo,
+        onDeleteVideo = vm::deleteDownloadedVideo,
     )
 }
 
@@ -135,6 +155,13 @@ fun VideoDownloadEmbeddedPage() {
             val message = openTorrentFile(context, path)
             if (message != null) vm.setMessage(message)
         },
+        onOpenVideos = vm::openSubscriptionVideos,
+        onRescanVideos = vm::rescanActiveVideos,
+        onSaveVideoFolder = vm::saveVideoFolderInput,
+        onVideoFolderPicked = vm::savePickedVideoFolder,
+        onMatchVideo = vm::matchDownloadedVideo,
+        onOffsetVideo = vm::offsetDownloadedVideo,
+        onDeleteVideo = vm::deleteDownloadedVideo,
     )
 }
 
@@ -169,13 +196,39 @@ private fun VideoDownloadScreenEmbedded(
     onRefreshEntries: () -> Unit,
     onDownloadTorrent: (String) -> Unit,
     onOpenTorrent: (String) -> Unit,
+    onOpenVideos: (String) -> Unit,
+    onRescanVideos: () -> Unit,
+    onSaveVideoFolder: (String) -> SaveVideoFolderResult,
+    onVideoFolderPicked: (Uri) -> Unit,
+    onMatchVideo: (String) -> Unit,
+    onOffsetVideo: (String, Long) -> Unit,
+    onDeleteVideo: (String) -> Unit,
 ) {
     var addDialogVisible by remember { mutableStateOf(false) }
+    var settingsVisible by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val videoFolderLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let {
+                persistTreeReadWritePermission(context, it)
+                onVideoFolderPicked(it)
+            }
+        }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (state.activeSubscriptionId == null) "" else state.activeSubscriptionLabel) },
+                title = {
+                    Text(
+                        if (state.activeSubscriptionId == null) {
+                            ""
+                        } else if (state.videosViewActive) {
+                            "${state.activeSubscriptionLabel} · 视频"
+                        } else {
+                            state.activeSubscriptionLabel
+                        },
+                    )
+                },
                 navigationIcon = {
                     if (state.activeSubscriptionId != null) {
                         TextButton(onClick = onBackToList) { Text("返回") }
@@ -186,8 +239,19 @@ private fun VideoDownloadScreenEmbedded(
                         TextButton(onClick = onPullSubscriptionSync, enabled = !state.syncingConfig) { Text("Pull") }
                         TextButton(onClick = onPushSubscriptionSync, enabled = !state.syncingConfig) { Text("Push") }
                         TextButton(onClick = { addDialogVisible = true }, enabled = !state.syncingConfig) { Text("添加") }
+                        TextButton(onClick = { settingsVisible = true }) { Text("设置") }
                     } else {
-                        RefreshEntriesButton(state = state, onRefreshEntries = onRefreshEntries)
+                        RefreshEntriesButton(
+                            loading = if (state.videosViewActive) state.loadingVideos else state.loadingEntries,
+                            failed = if (state.videosViewActive) state.videosLoadFailed else state.entriesRefreshFailed,
+                            onRefresh = if (state.videosViewActive) onRescanVideos else onRefreshEntries,
+                            confirmMessage =
+                                if (state.videosViewActive) {
+                                    "是否重新扫描本地视频目录？"
+                                } else {
+                                    "是否重新拉取最新的条目列表？"
+                                },
+                        )
                     }
                 },
             )
@@ -213,7 +277,16 @@ private fun VideoDownloadScreenEmbedded(
                 SubscriptionList(
                     subscriptions = state.subscriptions,
                     onOpenSubscription = onOpenSubscription,
+                    onOpenVideos = onOpenVideos,
                     onRemoveSubscription = onRemoveSubscription,
+                )
+            } else if (state.videosViewActive) {
+                DownloadedVideoList(
+                    videos = state.activeVideos,
+                    controlsEnabled = !state.deletingVideo,
+                    onMatchVideo = onMatchVideo,
+                    onOffsetVideo = onOffsetVideo,
+                    onDeleteVideo = onDeleteVideo,
                 )
             } else {
                 TorrentEntryList(
@@ -234,6 +307,17 @@ private fun VideoDownloadScreenEmbedded(
             },
         )
     }
+
+    if (settingsVisible) {
+        VideoFolderSettingsDialog(
+            currentLabel = state.videoFolderLabel,
+            currentUri = state.videoFolderUri,
+            onBrowse = { videoFolderLauncher.launch(null) },
+            onSave = onSaveVideoFolder,
+            onRequestGrant = { initial -> videoFolderLauncher.launch(initial) },
+            onDismiss = { settingsVisible = false },
+        )
+    }
 }
 
 data class VideoDownloadUiState(
@@ -243,9 +327,30 @@ data class VideoDownloadUiState(
     val activeEntries: List<TorrentEntryItem> = emptyList(),
     val loadingEntries: Boolean = false,
     val entriesRefreshFailed: Boolean = false,
+    val videosViewActive: Boolean = false,
+    val activeVideos: List<VideoItem> = emptyList(),
+    val loadingVideos: Boolean = false,
+    val videosLoadFailed: Boolean = false,
+    val deletingVideo: Boolean = false,
+    val videoFolderUri: String = "",
+    val videoFolderLabel: String = "",
     val syncingConfig: Boolean = false,
     val message: String = "请先添加视频订阅链接。",
 )
+
+sealed interface SaveVideoFolderResult {
+    data object Saved : SaveVideoFolderResult
+
+    data object Cleared : SaveVideoFolderResult
+
+    data class Invalid(
+        val message: String,
+    ) : SaveVideoFolderResult
+
+    data class NeedGrant(
+        val initialUri: Uri,
+    ) : SaveVideoFolderResult
+}
 
 private data class PersistedSubscription(
     val id: String,
@@ -260,6 +365,15 @@ private data class ParsedTorrentEntry(
     val sizeText: String,
     val uploadText: String,
     val downloadUrl: String,
+)
+
+private data class PersistedVideo(
+    val id: String,
+    val uri: String,
+    val folderUri: String,
+    val title: String,
+    val episode: Int?,
+    val subtitleStatus: String,
 )
 
 private data class SeedSyncConfig(
@@ -283,6 +397,11 @@ class VideoDownloadViewModel(
         private const val PREF_NAME = "anisubroid_video_download"
         private const val KEY_SUBSCRIPTIONS = "subscriptions"
         private const val KEY_ENTRY_CACHE_PREFIX = "entry_cache_"
+        private const val KEY_VIDEO_CACHE_PREFIX = "video_cache_"
+        private const val KEY_VIDEO_FOLDER_URI = "video_folder_uri"
+        private const val KEY_VIDEO_FOLDER_LABEL = "video_folder_label"
+        private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
+        private const val VIDEO_SCAN_MAX_DEPTH = 2
         private const val ROW_SEPARATOR = "\n"
         private const val FIELD_SEPARATOR = "\t"
         private const val DOWNLOAD_ROOT = "video_subscriptions"
@@ -305,14 +424,18 @@ class VideoDownloadViewModel(
     private val _uiState = MutableStateFlow(VideoDownloadUiState())
     val uiState: StateFlow<VideoDownloadUiState> = _uiState.asStateFlow()
 
+    private val jimakuMatcher = JimakuSubtitleMatcher(application)
     private var subscriptions: List<PersistedSubscription> = emptyList()
     private var entryFetchGeneration = 0L
+    private var videoScanGeneration = 0L
 
     init {
         subscriptions = readSubscriptions()
         _uiState.update {
             it.copy(
                 subscriptions = subscriptions.map(::toUiSubscription),
+                videoFolderUri = prefs.getString(KEY_VIDEO_FOLDER_URI, "").orEmpty(),
+                videoFolderLabel = prefs.getString(KEY_VIDEO_FOLDER_LABEL, "").orEmpty(),
                 message = if (subscriptions.isEmpty()) "请先添加视频订阅链接。" else "请选择一个订阅查看条目。",
             )
         }
@@ -366,6 +489,11 @@ class VideoDownloadViewModel(
                             activeEntries = emptyList(),
                             loadingEntries = false,
                             entriesRefreshFailed = false,
+                            videosViewActive = false,
+                            activeVideos = emptyList(),
+                            loadingVideos = false,
+                            videosLoadFailed = false,
+                            deletingVideo = false,
                             message =
                                 if (result.fileFound) {
                                     "Pull 完成：已同步 ${result.syncedCount} 条订阅配置。"
@@ -466,7 +594,7 @@ class VideoDownloadViewModel(
         val removed = subscriptions.firstOrNull { it.id == id } ?: return
         subscriptions = subscriptions.filterNot { it.id == id }
         persistSubscriptions()
-        prefs.edit().remove(entryCacheKey(id)).apply()
+        prefs.edit().remove(entryCacheKey(id)).remove(videoCacheKey(id)).apply()
         val current = _uiState.value
         val shouldExitDetail = current.activeSubscriptionId == id
         _uiState.update {
@@ -475,6 +603,11 @@ class VideoDownloadViewModel(
                 activeSubscriptionId = if (shouldExitDetail) null else it.activeSubscriptionId,
                 activeSubscriptionLabel = if (shouldExitDetail) "" else it.activeSubscriptionLabel,
                 activeEntries = if (shouldExitDetail) emptyList() else it.activeEntries,
+                videosViewActive = if (shouldExitDetail) false else it.videosViewActive,
+                activeVideos = if (shouldExitDetail) emptyList() else it.activeVideos,
+                loadingVideos = if (shouldExitDetail) false else it.loadingVideos,
+                videosLoadFailed = if (shouldExitDetail) false else it.videosLoadFailed,
+                deletingVideo = if (shouldExitDetail) false else it.deletingVideo,
                 loadingEntries = false,
                 entriesRefreshFailed = false,
                 message = "已删除订阅：${removed.label}",
@@ -492,6 +625,11 @@ class VideoDownloadViewModel(
                 loadingEntries = true,
                 entriesRefreshFailed = false,
                 activeEntries = emptyList(),
+                videosViewActive = false,
+                activeVideos = emptyList(),
+                loadingVideos = false,
+                videosLoadFailed = false,
+                deletingVideo = false,
                 message = "",
             )
         }
@@ -550,6 +688,338 @@ class VideoDownloadViewModel(
         openSubscription(activeId)
     }
 
+    fun savePickedVideoFolder(uri: Uri) {
+        val label =
+            runCatching { DocumentFile.fromTreeUri(appContext, uri)?.name }.getOrNull()
+                ?: uri.lastPathSegment
+                ?: uri.toString()
+        prefs
+            .edit()
+            .putString(KEY_VIDEO_FOLDER_URI, uri.toString())
+            .putString(KEY_VIDEO_FOLDER_LABEL, label)
+            .apply()
+        _uiState.update {
+            it.copy(
+                videoFolderUri = uri.toString(),
+                videoFolderLabel = label,
+                message = "已关联视频文件夹：$label",
+            )
+        }
+    }
+
+    fun saveVideoFolderInput(rawInput: String): SaveVideoFolderResult {
+        val input = rawInput.trim()
+        if (input.isBlank()) {
+            prefs.edit().remove(KEY_VIDEO_FOLDER_URI).remove(KEY_VIDEO_FOLDER_LABEL).apply()
+            _uiState.update {
+                it.copy(
+                    videoFolderUri = "",
+                    videoFolderLabel = "",
+                    message = "已清除视频文件夹关联。",
+                )
+            }
+            return SaveVideoFolderResult.Cleared
+        }
+
+        val treeUri =
+            if (input.startsWith("content://")) {
+                Uri.parse(input)
+            } else {
+                val docId =
+                    pathToTreeDocId(input)
+                        ?: return SaveVideoFolderResult.Invalid("无法识别该路径，请使用「浏览」选择文件夹。")
+                DocumentsContract.buildTreeDocumentUri(EXTERNAL_STORAGE_AUTHORITY, docId)
+            }
+        val docId =
+            runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+                ?: return SaveVideoFolderResult.Invalid("文件夹 URI 格式无效。")
+        if (!hasTreePermissionFor(docId)) {
+            val initialUri =
+                runCatching { DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, docId) }
+                    .getOrDefault(treeUri)
+            return SaveVideoFolderResult.NeedGrant(initialUri)
+        }
+
+        savePickedVideoFolder(treeUri)
+        return SaveVideoFolderResult.Saved
+    }
+
+    fun openSubscriptionVideos(id: String) {
+        val target = subscriptions.firstOrNull { it.id == id } ?: return
+        val folderRaw = prefs.getString(KEY_VIDEO_FOLDER_URI, null)
+        if (folderRaw.isNullOrBlank()) {
+            _uiState.update { it.copy(message = "请先在右上角「设置」中关联本地视频文件夹。") }
+            return
+        }
+        val folderUri = Uri.parse(folderRaw)
+        val generation = ++videoScanGeneration
+        _uiState.update {
+            it.copy(
+                activeSubscriptionId = target.id,
+                activeSubscriptionLabel = target.label,
+                videosViewActive = true,
+                activeVideos = emptyList(),
+                loadingVideos = true,
+                videosLoadFailed = false,
+                activeEntries = emptyList(),
+                loadingEntries = false,
+                entriesRefreshFailed = false,
+                deletingVideo = false,
+                message = "",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            fun updateVideos(transform: VideoDownloadUiState.() -> VideoDownloadUiState) {
+                _uiState.update {
+                    if (it.activeSubscriptionId == target.id && generation == videoScanGeneration) it.transform() else it
+                }
+            }
+
+            val cachedVideos = readCachedVideos(target.id)
+            if (cachedVideos.isNotEmpty()) {
+                updateVideos { copy(activeVideos = cachedVideos.map(::toUiVideo)) }
+            }
+
+            runCatching {
+                if (SubtitleNameHeuristics.normalize(target.label).isBlank()) {
+                    error("订阅名称为空，无法匹配视频。")
+                }
+                val root =
+                    DocumentFile.fromTreeUri(appContext, folderUri)
+                        ?: error("无法访问已关联的视频文件夹，请在「设置」中重新关联。")
+                val scanned = collectVideoFilesUnder(root)
+                val subtitleBases = collectExistingSubtitleBaseNames(root)
+                scanned
+                    .filter { videoNameMatchesQuery(it.file.name.orEmpty(), target.label) }
+                    .sortedBy { it.file.name?.lowercase(Locale.ROOT).orEmpty() }
+                    .map { item ->
+                        val title = item.file.name ?: item.file.uri.lastPathSegment.orEmpty()
+                        PersistedVideo(
+                            id = item.file.uri.toString(),
+                            uri = item.file.uri.toString(),
+                            folderUri = item.parent.uri.toString(),
+                            title = title,
+                            episode = SubtitleNameHeuristics.extractEpisode(title),
+                            subtitleStatus =
+                                if (subtitleBases.contains(stripExtension(title).lowercase(Locale.ROOT))) {
+                                    "已存在对应字幕"
+                                } else {
+                                    "未匹配"
+                                },
+                        )
+                    }
+            }.fold(
+                onSuccess = { videos ->
+                    if (videos != cachedVideos) {
+                        persistCachedVideos(target.id, videos)
+                    }
+                    updateVideos {
+                        copy(
+                            loadingVideos = false,
+                            activeVideos = videos.map(::toUiVideo),
+                            message =
+                                if (videos.isEmpty()) {
+                                    "该目录下没有与订阅名称「${target.label}」匹配的视频。"
+                                } else {
+                                    "匹配到 ${videos.size} 个视频。"
+                                },
+                        )
+                    }
+                },
+                onFailure = { error ->
+                    Log.e(TAG, "Scan downloaded videos failed.", error)
+                    updateVideos {
+                        copy(
+                            loadingVideos = false,
+                            videosLoadFailed = true,
+                            message =
+                                if (activeVideos.isEmpty()) {
+                                    "视频加载失败：${error.message ?: "未知错误"}"
+                                } else {
+                                    message
+                                },
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    fun rescanActiveVideos() {
+        val activeId = _uiState.value.activeSubscriptionId ?: return
+        openSubscriptionVideos(activeId)
+    }
+
+    fun matchDownloadedVideo(videoId: String) {
+        if (_uiState.value.deletingVideo) return
+        val target = _uiState.value.activeVideos.firstOrNull { it.id == videoId } ?: return
+        _uiState.update { state ->
+            state.copy(
+                activeVideos =
+                    state.activeVideos.map { item ->
+                        if (item.id == videoId) {
+                            item.copy(subtitleStatus = "正在匹配并下载字幕...", matching = true)
+                        } else {
+                            item
+                        }
+                    },
+                message = "正在匹配字幕：${target.title}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val output =
+                runCatching { jimakuMatcher.matchAndDownload(target) }
+                    .fold(
+                        onSuccess = { "匹配成功：${it.savedFileName}" },
+                        onFailure = { error ->
+                            Log.e(TAG, "Subtitle match failed for: ${target.title}", error)
+                            "匹配失败：${error.message ?: "未知错误"}"
+                        },
+                    )
+            _uiState.update { state ->
+                state.copy(
+                    activeVideos =
+                        state.activeVideos.map { item ->
+                            if (item.id == videoId) item.copy(subtitleStatus = output, matching = false) else item
+                        },
+                    message = output,
+                )
+            }
+        }
+    }
+
+    fun offsetDownloadedVideo(
+        videoId: String,
+        offsetMillis: Long,
+    ) {
+        if (_uiState.value.deletingVideo) return
+        val target = _uiState.value.activeVideos.firstOrNull { it.id == videoId } ?: return
+        _uiState.update { state ->
+            state.copy(
+                activeVideos =
+                    state.activeVideos.map { item ->
+                        if (item.id == videoId) item.copy(subtitleStatus = "正在偏移字幕...", matching = true) else item
+                    },
+                message = "正在偏移字幕：${target.title}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val output =
+                runCatching {
+                    val subtitleFile =
+                        findMatchingSubtitleFile(appContext, target.folderUri, target.title)
+                            ?: error("未找到对应字幕。")
+                    val changedCount = applyOffsetToSubtitleFile(appContext, subtitleFile, offsetMillis)
+                    "偏移成功：${subtitleFile.name ?: "未知字幕"}（$changedCount 处时间，${formatOffsetLabel(offsetMillis)}）"
+                }.getOrElse { error -> "偏移失败：${error.message ?: "未知错误"}" }
+
+            _uiState.update { state ->
+                state.copy(
+                    activeVideos =
+                        state.activeVideos.map { item ->
+                            if (item.id == videoId) item.copy(subtitleStatus = output, matching = false) else item
+                        },
+                    message = output,
+                )
+            }
+        }
+    }
+
+    fun deleteDownloadedVideo(videoId: String) {
+        val snapshot = _uiState.value
+        if (snapshot.deletingVideo) return
+        if (snapshot.activeVideos.any { it.matching }) {
+            _uiState.update { it.copy(message = "请等待当前匹配或偏移完成后再删除。") }
+            return
+        }
+        val target = snapshot.activeVideos.firstOrNull { it.id == videoId } ?: return
+        _uiState.update {
+            it.copy(
+                deletingVideo = true,
+                message = "正在硬删除：${target.title}",
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { deleteVideoAndRelatedFiles(appContext, target) }
+                .onSuccess { result ->
+                    _uiState.value.activeSubscriptionId?.let { subscriptionId ->
+                        persistCachedVideos(
+                            subscriptionId,
+                            readCachedVideos(subscriptionId).filterNot { it.id == videoId },
+                        )
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            deletingVideo = false,
+                            activeVideos = state.activeVideos.filterNot { it.id == videoId },
+                            message = buildDeletedVideoMessage(target, result),
+                        )
+                    }
+                }.onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            deletingVideo = false,
+                            message = "删除失败：${error.message ?: "未知错误"}",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun hasTreePermissionFor(docId: String): Boolean =
+        appContext.contentResolver.persistedUriPermissions.any { permission ->
+            permission.isReadPermission &&
+                runCatching { DocumentsContract.getTreeDocumentId(permission.uri) }
+                    .map { granted -> docId == granted || docId.startsWith("$granted/") }
+                    .getOrDefault(false)
+        }
+
+    private data class ScannedDownloadedVideo(
+        val file: DocumentFile,
+        val parent: DocumentFile,
+    )
+
+    private fun collectVideoFilesUnder(root: DocumentFile): List<ScannedDownloadedVideo> {
+        val results = mutableListOf<ScannedDownloadedVideo>()
+
+        fun visit(
+            dir: DocumentFile,
+            depth: Int,
+        ) {
+            dir.listFiles().forEach { child ->
+                when {
+                    child.isFile && isVideoFile(child) -> results += ScannedDownloadedVideo(file = child, parent = dir)
+                    child.isDirectory && depth < VIDEO_SCAN_MAX_DEPTH && !child.name.equals("sub", ignoreCase = true) ->
+                        visit(child, depth + 1)
+                }
+            }
+        }
+
+        visit(root, 0)
+        return results
+    }
+
+    private fun buildDeletedVideoMessage(
+        video: VideoItem,
+        result: DeleteVideoResult,
+    ): String {
+        val suffix =
+            when {
+                result.deletedSubtitleCount > 0 && result.failedSubtitleNames.isEmpty() ->
+                    "，并删除 ${result.deletedSubtitleCount} 个同名字幕。"
+                result.deletedSubtitleCount > 0 ->
+                    "，已删除 ${result.deletedSubtitleCount} 个同名字幕，另有 ${result.failedSubtitleNames.size} 个同名字幕删除失败。"
+                result.failedSubtitleNames.isNotEmpty() ->
+                    "，但有 ${result.failedSubtitleNames.size} 个同名字幕删除失败。"
+                else -> "。"
+            }
+        return "已硬删除：${video.title}$suffix"
+    }
+
     fun backToList() {
         _uiState.update {
             it.copy(
@@ -558,6 +1028,11 @@ class VideoDownloadViewModel(
                 activeEntries = emptyList(),
                 loadingEntries = false,
                 entriesRefreshFailed = false,
+                videosViewActive = false,
+                activeVideos = emptyList(),
+                loadingVideos = false,
+                videosLoadFailed = false,
+                deletingVideo = false,
                 message = "请选择一个订阅查看条目。",
                 subscriptions = subscriptions.map(::toUiSubscription),
             )
@@ -715,6 +1190,62 @@ class VideoDownloadViewModel(
             }
         prefs.edit().putString(entryCacheKey(subscriptionId), payload).apply()
     }
+
+    private fun videoCacheKey(subscriptionId: String): String = "$KEY_VIDEO_CACHE_PREFIX$subscriptionId"
+
+    private fun readCachedVideos(subscriptionId: String): List<PersistedVideo> {
+        val raw = prefs.getString(videoCacheKey(subscriptionId), "").orEmpty()
+        if (raw.isBlank()) return emptyList()
+        return raw.split(ROW_SEPARATOR)
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { row ->
+                val parts = row.split(FIELD_SEPARATOR, limit = 6)
+                if (parts.size != 6) return@mapNotNull null
+                PersistedVideo(
+                    id = Uri.decode(parts[0]),
+                    uri = Uri.decode(parts[1]),
+                    folderUri = Uri.decode(parts[2]),
+                    title = Uri.decode(parts[3]),
+                    episode = Uri.decode(parts[4]).toIntOrNull(),
+                    subtitleStatus = Uri.decode(parts[5]),
+                )
+            }
+            .toList()
+    }
+
+    private fun persistCachedVideos(
+        subscriptionId: String,
+        videos: List<PersistedVideo>,
+    ) {
+        if (videos.isEmpty()) {
+            prefs.edit().remove(videoCacheKey(subscriptionId)).apply()
+            return
+        }
+        val payload =
+            videos.joinToString(ROW_SEPARATOR) { video ->
+                listOf(
+                    video.id,
+                    video.uri,
+                    video.folderUri,
+                    video.title,
+                    video.episode?.toString().orEmpty(),
+                    video.subtitleStatus,
+                ).joinToString(FIELD_SEPARATOR) { Uri.encode(it) }
+            }
+        prefs.edit().putString(videoCacheKey(subscriptionId), payload).apply()
+    }
+
+    private fun toUiVideo(item: PersistedVideo): VideoItem =
+        VideoItem(
+            id = item.id,
+            uri = Uri.parse(item.uri),
+            folderUri = Uri.parse(item.folderUri),
+            title = item.title,
+            episode = item.episode,
+            subtitleStatus = item.subtitleStatus,
+        )
 
     private fun fetchEntriesFromSubscription(url: String): List<ParsedTorrentEntry> {
         val html = downloadText(url)
@@ -1039,6 +1570,49 @@ class VideoDownloadViewModel(
     }
 }
 
+internal fun pathToTreeDocId(path: String): String? {
+    val normalized = path.trim().trimEnd('/')
+    if (normalized.isBlank()) return null
+    val primaryRoots = listOf("/storage/emulated/0", "/sdcard", "/mnt/sdcard", "/storage/self/primary")
+    for (root in primaryRoots) {
+        if (normalized == root) return "primary:"
+        if (normalized.startsWith("$root/")) return "primary:" + normalized.removePrefix("$root/")
+    }
+    val external = Regex("""^/storage/([0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})(?:/(.*))?$""").find(normalized)
+    if (external != null) {
+        val volume = external.groupValues[1]
+        val relative = external.groupValues[2]
+        return if (relative.isBlank()) "$volume:" else "$volume:$relative"
+    }
+    return null
+}
+
+internal fun treeDocIdToDisplayPath(docId: String): String {
+    val separator = docId.indexOf(':')
+    if (separator < 0) return docId
+    val volume = docId.substring(0, separator)
+    val relative = docId.substring(separator + 1)
+    val root = if (volume == "primary") "/storage/emulated/0" else "/storage/$volume"
+    return if (relative.isBlank()) root else "$root/$relative"
+}
+
+internal fun videoFolderInputDisplay(storedUri: String): String {
+    if (storedUri.isBlank()) return ""
+    val uri = runCatching { Uri.parse(storedUri) }.getOrNull() ?: return storedUri
+    val docId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return storedUri
+    return treeDocIdToDisplayPath(docId)
+}
+
+internal fun videoNameMatchesQuery(
+    videoName: String,
+    query: String,
+): Boolean {
+    val name = SubtitleNameHeuristics.normalize(stripExtension(videoName))
+    val tokens = SubtitleNameHeuristics.normalize(query).split(' ').filter { it.isNotBlank() }
+    if (name.isBlank() || tokens.isEmpty()) return false
+    return tokens.all { token -> name.contains(token) }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VideoDownloadScreen(
@@ -1053,13 +1627,39 @@ private fun VideoDownloadScreen(
     onRefreshEntries: () -> Unit,
     onDownloadTorrent: (String) -> Unit,
     onOpenTorrent: (String) -> Unit,
+    onOpenVideos: (String) -> Unit,
+    onRescanVideos: () -> Unit,
+    onSaveVideoFolder: (String) -> SaveVideoFolderResult,
+    onVideoFolderPicked: (Uri) -> Unit,
+    onMatchVideo: (String) -> Unit,
+    onOffsetVideo: (String, Long) -> Unit,
+    onDeleteVideo: (String) -> Unit,
 ) {
     var addDialogVisible by remember { mutableStateOf(false) }
+    var settingsVisible by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val videoFolderLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let {
+                persistTreeReadWritePermission(context, it)
+                onVideoFolderPicked(it)
+            }
+        }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (state.activeSubscriptionId == null) "视频下载" else state.activeSubscriptionLabel) },
+                title = {
+                    Text(
+                        if (state.activeSubscriptionId == null) {
+                            "视频下载"
+                        } else if (state.videosViewActive) {
+                            "${state.activeSubscriptionLabel} · 视频"
+                        } else {
+                            state.activeSubscriptionLabel
+                        },
+                    )
+                },
                 navigationIcon = {
                     TextButton(onClick = {
                         if (state.activeSubscriptionId == null) onBack() else onBackToList()
@@ -1072,8 +1672,19 @@ private fun VideoDownloadScreen(
                         TextButton(onClick = onPullSubscriptionSync, enabled = !state.syncingConfig) { Text("Pull") }
                         TextButton(onClick = onPushSubscriptionSync, enabled = !state.syncingConfig) { Text("Push") }
                         TextButton(onClick = { addDialogVisible = true }, enabled = !state.syncingConfig) { Text("添加") }
+                        TextButton(onClick = { settingsVisible = true }) { Text("设置") }
                     } else {
-                        RefreshEntriesButton(state = state, onRefreshEntries = onRefreshEntries)
+                        RefreshEntriesButton(
+                            loading = if (state.videosViewActive) state.loadingVideos else state.loadingEntries,
+                            failed = if (state.videosViewActive) state.videosLoadFailed else state.entriesRefreshFailed,
+                            onRefresh = if (state.videosViewActive) onRescanVideos else onRefreshEntries,
+                            confirmMessage =
+                                if (state.videosViewActive) {
+                                    "是否重新扫描本地视频目录？"
+                                } else {
+                                    "是否重新拉取最新的条目列表？"
+                                },
+                        )
                     }
                 },
             )
@@ -1099,7 +1710,16 @@ private fun VideoDownloadScreen(
                 SubscriptionList(
                     subscriptions = state.subscriptions,
                     onOpenSubscription = onOpenSubscription,
+                    onOpenVideos = onOpenVideos,
                     onRemoveSubscription = onRemoveSubscription,
+                )
+            } else if (state.videosViewActive) {
+                DownloadedVideoList(
+                    videos = state.activeVideos,
+                    controlsEnabled = !state.deletingVideo,
+                    onMatchVideo = onMatchVideo,
+                    onOffsetVideo = onOffsetVideo,
+                    onDeleteVideo = onDeleteVideo,
                 )
             } else {
                 TorrentEntryList(
@@ -1120,12 +1740,24 @@ private fun VideoDownloadScreen(
             },
         )
     }
+
+    if (settingsVisible) {
+        VideoFolderSettingsDialog(
+            currentLabel = state.videoFolderLabel,
+            currentUri = state.videoFolderUri,
+            onBrowse = { videoFolderLauncher.launch(null) },
+            onSave = onSaveVideoFolder,
+            onRequestGrant = { initial -> videoFolderLauncher.launch(initial) },
+            onDismiss = { settingsVisible = false },
+        )
+    }
 }
 
 @Composable
 private fun SubscriptionList(
     subscriptions: List<VideoSubscriptionItem>,
     onOpenSubscription: (String) -> Unit,
+    onOpenVideos: (String) -> Unit,
     onRemoveSubscription: (String) -> Unit,
 ) {
     var pendingDelete by remember { mutableStateOf<VideoSubscriptionItem?>(null) }
@@ -1151,24 +1783,41 @@ private fun SubscriptionList(
                     modifier = Modifier.padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        text = item.label,
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = item.url,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = if (item.downloadedCount > 0) "本地状态：已下载 ${item.downloadedCount} 个种子" else "本地状态：未下载",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (item.downloadedCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = item.label,
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = item.url,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = if (item.downloadedCount > 0) "本地状态：已下载 ${item.downloadedCount} 个种子" else "本地状态：未下载",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (item.downloadedCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        FilledTonalIconButton(
+                            onClick = { pendingDelete = item },
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Text("×")
+                        }
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1177,13 +1826,13 @@ private fun SubscriptionList(
                             onClick = { onOpenSubscription(item.id) },
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text("查看条目")
+                            Text("种子")
                         }
-                        TextButton(
-                            onClick = { pendingDelete = item },
+                        Button(
+                            onClick = { onOpenVideos(item.id) },
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text("删除")
+                            Text("视频")
                         }
                     }
                 }
@@ -1217,22 +1866,24 @@ private fun SubscriptionList(
 
 @Composable
 private fun RefreshEntriesButton(
-    state: VideoDownloadUiState,
-    onRefreshEntries: () -> Unit,
+    loading: Boolean,
+    failed: Boolean,
+    onRefresh: () -> Unit,
+    confirmMessage: String,
 ) {
     var confirmVisible by remember { mutableStateOf(false) }
     val label =
         when {
-            state.loadingEntries -> "刷新中..."
-            state.entriesRefreshFailed -> "刷新失败"
+            loading -> "刷新中..."
+            failed -> "刷新失败"
             else -> "刷新"
         }
     TextButton(
         onClick = {
-            if (state.loadingEntries || state.entriesRefreshFailed) {
+            if (loading || failed) {
                 confirmVisible = true
             } else {
-                onRefreshEntries()
+                onRefresh()
             }
         },
     ) {
@@ -1241,13 +1892,13 @@ private fun RefreshEntriesButton(
     if (confirmVisible) {
         AlertDialog(
             onDismissRequest = { confirmVisible = false },
-            title = { Text("刷新条目") },
-            text = { Text("是否重新拉取最新的条目列表？") },
+            title = { Text("刷新") },
+            text = { Text(confirmMessage) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         confirmVisible = false
-                        onRefreshEntries()
+                        onRefresh()
                     },
                 ) {
                     Text("确认")
@@ -1325,6 +1976,145 @@ private fun TorrentEntryList(
             }
         }
     }
+}
+
+@Composable
+private fun DownloadedVideoList(
+    videos: List<VideoItem>,
+    controlsEnabled: Boolean,
+    onMatchVideo: (String) -> Unit,
+    onOffsetVideo: (String, Long) -> Unit,
+    onDeleteVideo: (String) -> Unit,
+) {
+    var offsetTarget by remember { mutableStateOf<VideoItem?>(null) }
+    var deleteTarget by remember { mutableStateOf<VideoItem?>(null) }
+    val context = LocalContext.current
+
+    if (videos.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("没有匹配到视频。")
+        }
+    } else {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(videos, key = { it.id }) { item ->
+                VideoRow(
+                    item = item,
+                    onMatchSubtitle = { onMatchVideo(item.id) },
+                    onOffsetSubtitle = { offsetTarget = item },
+                    onPlayVideo = { playVideoWithMpv(context, item.uri, item.folderUri, item.title) },
+                    onDeleteVideo = { deleteTarget = item },
+                    controlsEnabled = controlsEnabled,
+                )
+            }
+        }
+    }
+
+    offsetTarget?.let { target ->
+        SubtitleOffsetDialog(
+            title = "字幕偏移",
+            description = "输入偏移量（毫秒，可为负数）后，将修改该条目对应字幕的全部时间。",
+            onDismiss = { offsetTarget = null },
+            onConfirm = { offset ->
+                onOffsetVideo(target.id, offset)
+                offsetTarget = null
+            },
+        )
+    }
+
+    deleteTarget?.let { target ->
+        DeleteVideoConfirmDialog(
+            target = target,
+            onDismiss = { deleteTarget = null },
+            onConfirm = {
+                onDeleteVideo(target.id)
+                deleteTarget = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun VideoFolderSettingsDialog(
+    currentLabel: String,
+    currentUri: String,
+    onBrowse: () -> Unit,
+    onSave: (String) -> SaveVideoFolderResult,
+    onRequestGrant: (Uri) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var input by remember(currentUri) { mutableStateOf(videoFolderInputDisplay(currentUri)) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("种子下载设置") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "关联本地视频文件夹后，点击订阅的「视频」可查看与条目同名的已下载视频。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (currentLabel.isNotBlank()) {
+                    Text(
+                        text = "当前关联：$currentLabel",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = {
+                        input = it
+                        errorText = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("文件夹路径") },
+                    placeholder = { Text("/storage/emulated/0/Download 或文件夹 URI") },
+                    maxLines = 3,
+                )
+                TextButton(onClick = onBrowse) {
+                    Text("浏览选择文件夹")
+                }
+                errorText?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    when (val result = onSave(input)) {
+                        SaveVideoFolderResult.Saved,
+                        SaveVideoFolderResult.Cleared,
+                        -> onDismiss()
+                        is SaveVideoFolderResult.Invalid -> errorText = result.message
+                        is SaveVideoFolderResult.NeedGrant -> {
+                            onRequestGrant(result.initialUri)
+                            onDismiss()
+                        }
+                    }
+                },
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
