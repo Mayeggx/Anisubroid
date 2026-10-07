@@ -37,7 +37,7 @@
 4. 把 Windows 的 Gradle 依赖缓存快照拷入 `~/.gradle`（已拷过则跳过）；
 5. 创建或更新被 Git 忽略的 `local.properties`，把 `sdk.dir` 指向共享 SDK。
 
-若 JDK 17 已安装，可省略 `--install-jdk`。
+若 JDK 17 已安装，可省略 `--install-jdk`。需要创建 GitHub Release 时再附加 `--install-gh`，脚本会从 GitHub CLI 官方 apt 仓库安装 `gh`（后续随 `apt upgrade` 更新），仅 `release-git.sh --create-github-release` 需要它。
 
 **独立 SDK 模式**：不想让 WSL 往宿主 SDK 里写东西时，指定 WSL 本地路径即可走完整 cmdline-tools 安装流程（约 340MB）：
 
@@ -107,7 +107,32 @@ BUILD_RETRY_LOG_DIR="/tmp/anisubroid-build-logs" ./wsl-scripts/build-debug-until
 
 行为与 macOS 版本一致：自动 stash 未提交改动 → 递增 `versionCode`、更新 `versionName` → 构建并归档到 `release/` → 提交 `Release v<version>` 与 annotated tag → 推送分支和 tag → 恢复 stash。
 
-常用选项：`--retry-build`、`--skip-push`、`--skip-build`、`--create-github-release`（需要 WSL 内已 `gh auth login`）。
+常用选项：`--retry-build`、`--skip-push`、`--skip-build`、`--create-github-release`。
+
+### GitHub Release（gh CLI）
+
+`--create-github-release` 在推送 tag 后调用 `gh` 创建/更新 GitHub Release 页面并上传归档 APK，需要 WSL 内安装并登录 GitHub CLI：
+
+```sh
+./wsl-scripts/init-android-env.sh --install-gh   # 从官方 apt 仓库安装 gh
+gh auth login                                    # 交互登录（设备码方式，任意浏览器完成授权）
+```
+
+如果宿主机 Windows 的 Git Credential Manager 已存有 github.com 凭据（WSL push 复用的那份），也可以免交互登录：
+
+```sh
+printf 'protocol=https\nhost=github.com\n\n' \
+  | /mnt/d/Software/Git/mingw64/libexec/git-core/git-credential-manager-core.exe get \
+  | sed -n 's/^password=//p' | tr -d '\r\n' | gh auth login --with-token
+```
+
+注意按本机实际路径替换 GCM 可执行文件（`git config --get credential.helper` 可查到）。认证态保存在 `~/.config/gh/hosts.yml`，一次登录长期有效。
+
+tag 已推送但 Release 页面缺失时，可用 republish 模式单独补建（跳过构建与提交，直接复用 `release/` 下已归档的 APK）：
+
+```sh
+./wsl-scripts/release-git.sh --version-name "1.1.1" --skip-build --create-github-release
+```
 
 ### WSL 内的 Git 身份与凭据
 

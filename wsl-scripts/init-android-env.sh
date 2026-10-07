@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/common.sh"
 COMMAND_LINE_TOOLS_URL="${ANDROID_CMDLINE_TOOLS_URL:-https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip}"
 INSTALL_JDK=false
 ACCEPT_LICENSES=false
+INSTALL_GH=false
 
 usage() {
     cat <<'EOF'
@@ -17,6 +18,8 @@ Usage: ./wsl-scripts/init-android-env.sh [options]
 Options:
   --install-jdk       Install OpenJDK 17 (plus curl/unzip) through apt when absent.
   --accept-licenses   Accept Android SDK licenses non-interactively (standalone SDK only).
+  --install-gh        Install GitHub CLI (gh) from the official apt repository when absent.
+                      Only needed for release-git.sh --create-github-release.
   -h, --help          Show this help message.
 
 Behavior:
@@ -40,6 +43,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --accept-licenses)
             ACCEPT_LICENSES=true
+            ;;
+        --install-gh)
+            INSTALL_GH=true
             ;;
         -h|--help)
             usage
@@ -71,6 +77,32 @@ install_apt_packages() {
     DEBIAN_FRONTEND=noninteractive "${sudo_cmd[@]}" apt-get install -y "$@"
 }
 
+# Installs GitHub CLI via the official apt repository so `apt upgrade` keeps it
+# current. Only required for release-git.sh --create-github-release.
+install_gh_cli() {
+    if command -v gh >/dev/null 2>&1; then
+        printf 'GitHub CLI already installed: %s\n' "$(gh --version | head -n 1)"
+        return 0
+    fi
+
+    printf '%s\n' "Installing GitHub CLI (gh) from the official apt repository..."
+    "${sudo_cmd[@]}" install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://cli.github.com/packages/githubcli-archive-keyring.gpg" |
+        "${sudo_cmd[@]}" tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+    "${sudo_cmd[@]}" chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
+        "$(dpkg --print-architecture)" |
+        "${sudo_cmd[@]}" tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+    "${sudo_cmd[@]}" apt-get update
+    install_apt_packages gh
+
+    command -v gh >/dev/null 2>&1 || {
+        printf '%s\n' "GitHub CLI installation finished but gh was not found on PATH." >&2
+        return 1
+    }
+    printf 'GH=%s\n' "$(gh --version | head -n 1)"
+}
+
 if ! resolve_java_home; then
     if [[ "$INSTALL_JDK" != true ]]; then
         printf '%s\n' "JDK 17 is required but not installed." >&2
@@ -91,6 +123,10 @@ command -v unzip >/dev/null 2>&1 || missing_tools+=(unzip)
 command -v nc >/dev/null 2>&1 || missing_tools+=(netcat-openbsd)
 if [[ ${#missing_tools[@]} -gt 0 ]]; then
     install_apt_packages "${missing_tools[@]}"
+fi
+
+if [[ "$INSTALL_GH" == true ]]; then
+    install_gh_cli
 fi
 
 require_java17

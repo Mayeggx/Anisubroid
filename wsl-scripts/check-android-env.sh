@@ -60,6 +60,19 @@ if [[ -n "$PROJECT_PROXY_HOST" ]]; then
     fi
 fi
 
+# gh is only needed for release-git.sh --create-github-release, so it is
+# reported but never counted as a missing requirement.
+if command -v gh >/dev/null 2>&1; then
+    printf 'GH=%s\n' "$(gh --version | head -n 1)"
+    if gh auth status --hostname github.com >/dev/null 2>&1; then
+        printf 'GH_AUTH=authenticated\n'
+    else
+        printf '%s\n' "note: gh is installed but not authenticated (needed only for --create-github-release). Run: gh auth login" >&2
+    fi
+else
+    printf '%s\n' "note: GitHub CLI (gh) not installed (needed only for --create-github-release). Install: ./wsl-scripts/init-android-env.sh --install-gh" >&2
+fi
+
 if [[ "$missing" -eq 0 ]]; then
     printf '%s\n' "Environment check passed."
 elif [[ "$strict" == true ]]; then

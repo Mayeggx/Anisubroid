@@ -336,7 +336,7 @@ else
 fi
 
 if [[ "$CREATE_GITHUB_RELEASE" == true ]]; then
-    command -v gh >/dev/null 2>&1 || fail "GitHub CLI (gh) is required for --create-github-release. Install and authenticate it first."
+    command -v gh >/dev/null 2>&1 || fail "GitHub CLI (gh) is required for --create-github-release. Run: ./wsl-scripts/init-android-env.sh --install-gh"
     gh auth status --hostname github.com >/dev/null
 
     UPLOAD_ASSET="${RELEASE_ASSET_PATH:-$RELEASE_ASSET}"
