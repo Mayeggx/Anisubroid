@@ -428,6 +428,8 @@ object SubtitleNameHeuristics {
     ): Double {
         val normalizedEntry = normalize(entryTitle)
         val compactEntry = normalizedEntry.replace(" ", "")
+        val requestedSeason = parsed.season
+        val entrySeason = extractSeason(entryTitle)
         var best = 0.0
         for (query in parsed.queryTitles) {
             val normalizedQuery = normalize(query)
@@ -439,14 +441,20 @@ object SubtitleNameHeuristics {
                 else -> 0.0
             }
             val compactTitleBonus =
-                if (compactEntry.isNotBlank() && compactEntry == compactQuery) 0.5 else 0.0
+                if (compactEntry.isNotBlank() && compactEntry == compactQuery &&
+                    (requestedSeason == null || entrySeason == requestedSeason)
+                ) {
+                    0.5
+                } else {
+                    0.0
+                }
             best = maxOf(best, tokenScore + containsBonus + compactTitleBonus)
         }
 
         val seasonAdjustment =
-            parsed.season?.let { requestedSeason ->
-                when (extractSeason(entryTitle)) {
-                    requestedSeason -> 0.2
+            requestedSeason?.let { requested ->
+                when (entrySeason) {
+                    requested -> 0.2
                     null -> 0.0
                     else -> -0.35
                 }
