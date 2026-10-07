@@ -18,10 +18,16 @@ android {
     }
 
     val importedDebugKeystore = providers.gradleProperty("anisubroid.debug.keystore").orNull
+    val sharedDebugKeystore = rootProject.file(".local-signing/debug.keystore")
     signingConfigs {
         getByName("debug") {
-            if (!importedDebugKeystore.isNullOrBlank()) {
-                storeFile = file(importedDebugKeystore)
+            val debugStoreFile = when {
+                !importedDebugKeystore.isNullOrBlank() -> file(importedDebugKeystore)
+                sharedDebugKeystore.isFile -> sharedDebugKeystore
+                else -> null
+            }
+            if (debugStoreFile != null) {
+                storeFile = debugStoreFile
                 storePassword = "android"
                 keyAlias = "androiddebugkey"
                 keyPassword = "android"

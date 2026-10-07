@@ -307,10 +307,18 @@ fi
 
 if [[ "$SKIP_BUILD" == false ]]; then
     ensure_local_properties
+    debug_keystore="$PROJECT_ROOT/.local-signing/debug.keystore"
+    gradle_args=(clean "$BUILD_TASK" --console=plain --stacktrace --no-daemon)
+    if [[ -f "$debug_keystore" ]]; then
+        printf 'Using shared debug keystore: %s\n' "$debug_keystore"
+        gradle_args+=("-Panisubroid.debug.keystore=$debug_keystore")
+    else
+        fail "Shared debug keystore not found: $debug_keystore (release builds must use the committed keystore so the APK signature stays consistent)"
+    fi
     if [[ "$RETRY_BUILD" == true ]]; then
         "$SCRIPT_DIR/build-debug-until-success.sh"
     else
-        sh "$PROJECT_ROOT/gradlew" clean "$BUILD_TASK" --console=plain --stacktrace --no-daemon
+        sh "$PROJECT_ROOT/gradlew" "${gradle_args[@]}"
     fi
 fi
 

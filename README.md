@@ -245,7 +245,7 @@ git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/bin/git-
 
 ### Debug 签名说明
 
-仓库提交了共享 Debug keystore `.local-signing/debug.keystore`（位于仓库根目录的隐藏目录内），`scripts/`、`mac-scripts/`、`wsl-scripts/` 三套构建脚本检测到它都会自动用于签名。任意设备构建出的 `app-debug.apk` 签名一致，可互相覆盖安装且保留应用数据。`.gitignore` 中的 `*.keystore` 规则仅用于防止其他密钥被误提交；正式签名密钥不要提交进仓库。
+仓库提交了共享 Debug keystore `.local-signing/debug.keystore`（位于仓库根目录的隐藏目录内），`app/build.gradle.kts` 会自动检测并使用它签名（脚本也可通过 `-Panisubroid.debug.keystore` 显式指定），因此任何构建路径产出的 APK 签名都一致。任意设备构建出的 `app-debug.apk` 签名一致，可互相覆盖安装且保留应用数据。`.gitignore` 中的 `*.keystore` 规则仅用于防止其他密钥被误提交；正式签名密钥不要提交进仓库。
 
 ## 3. 迭代日志
 

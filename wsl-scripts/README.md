@@ -69,8 +69,11 @@ app/build/outputs/apk/debug/app-debug.apk
 
 Debug APK 的签名 keystore 按以下优先级选取：
 
-1. 项目内 `.local-signing/debug.keystore`——`scripts/`、`mac-scripts/`、`wsl-scripts/` 三套脚本检测到它都会自动传入 `-Panisubroid.debug.keystore`，**推荐**；
-2. 否则用系统默认 debug keystore：WSL 为 `~/.android/debug.keystore`，Windows 为 `ANDROID_USER_HOME` 下的 `debug.keystore`（本机 `scripts/use-e-drive-android-env.ps1` 把它设为 `E:\Android\UserHome`，**不是** `C:\Users\<你>\.android`）。
+1. `-Panisubroid.debug.keystore=<路径>` 显式传入——`scripts/`、`mac-scripts/`、`wsl-scripts/` 三套构建脚本检测到 `.local-signing/debug.keystore` 都会自动传参；
+2. 未传参时 `app/build.gradle.kts` 自动检测仓库根目录的 `.local-signing/debug.keystore`——任何构建路径（`gradlew` 直调、Android Studio、`release-git.sh`）都会使用它，**推荐**；
+3. 以上都没有时用系统默认 debug keystore：WSL 为 `~/.android/debug.keystore`，Windows 为 `ANDROID_USER_HOME` 下的 `debug.keystore`（本机 `scripts/use-e-drive-android-env.ps1` 把它设为 `E:\Android\UserHome`，**不是** `C:\Users\<你>\.android`）。
+
+`release-git.sh` 在缺少 `.local-signing/debug.keystore` 时会直接拒绝构建，避免产出签名不一致的发布包。
 
 这意味着不同设备使用各自的默认 keystore 时，构建出的包签名不同，互相覆盖安装会报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。因此本仓库**直接提交了**统一的 keystore：文件位于**仓库根目录下以点开头的隐藏目录** `.local-signing/` 中，完整相对路径为 `.local-signing/debug.keystore`（本机即 `E:\Mega\Anisubroid\.local-signing\debug.keystore`，Windows 资源管理器需显示隐藏文件才可见），各设备克隆即用（debug 证书不含真实身份；公开后他人也能签出同签名的包，仅用于本项目内部开发，风险自担）。
 
