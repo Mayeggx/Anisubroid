@@ -8,8 +8,8 @@ Anisubroid 是一个 Kotlin + Jetpack Compose 编写的单模块 Android 应用�
 
 | 页面 | 能力 |
 |---|---|
+| 种子条目 | 默认首页。管理视频订阅 URL，拉取并本地缓存 NYAA 条目列表，下载并打开 `.torrent`；可关联本地视频文件夹，按订阅名匹配出已下载视频，复用字幕匹配式操作（候选字幕匹配、偏移、播放、删除），视频列表同样本地缓存；通过远端仓库 `seed-subscriptions.json` Push / Pull 订阅配置。 |
 | 字幕匹配 | 选择视频目录，使用 Jimaku 或 EdaTribe 搜索、确认并下载字幕；支持单条/批量匹配、`srt`/`ass`/`ssa` 时间偏移、播放，以及按集数批量硬删除视频与同名字幕。 |
-| 种子下载 | 管理视频订阅 URL，下载并打开 `.torrent`；通过远端仓库根目录的 `seed-subscriptions.json` Push / Pull 订阅配置。 |
 | 单词摘记 | 从图片目录批量生成英/日文卡片内容，并写入 AnkiDroid 的牌组与笔记。 |
 | 远程同步 | 将“设备 + 本地目录”条目同步到 Git 仓库，支持 Pull、Push、清空、删除、图片转 JPG 与压缩、操作日志。 |
 
@@ -19,7 +19,7 @@ Anisubroid 是一个 Kotlin + Jetpack Compose 编写的单模块 Android 应用�
 - Android Gradle Plugin 9.0.0、Kotlin Compose Plugin 2.2.21、Gradle 9.1.0
 - JDK 17
 - `compileSdk = 35`、`targetSdk = 34`、`minSdk = 26`
-- 当前应用版本：`versionName = "1.1.0"`、`versionCode = 13`
+- 当前应用版本：`versionName = "1.1.1"`、`versionCode = 14`
 
 ### 1.3 目录
 
@@ -40,6 +40,7 @@ Anisubroid/
 ├── scripts/                             # Windows PowerShell / Batch 构建与发布脚本
 ├── mac-scripts/                         # macOS Shell 构建与 Git 发布脚本
 ├── wsl-scripts/                         # WSL Shell 构建、调试与 Git 发布脚本(复用宿主环境)
+├── .local-signing/debug.keystore        # 共享 Debug 签名 keystore(多设备构建同签名,可互覆盖安装)
 ├── artwork/                             # 图标预览素材
 ├── build.gradle.kts                     # 根插件版本
 ├── settings.gradle.kts                  # 单模块 :app 配置
@@ -232,6 +233,8 @@ WSL 内 Git 身份与凭据独立于 Windows，首次发布前需配置 `user.na
 git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe"
 ```
 
+`--create-github-release` 可在推送 tag 后创建 GitHub Release 并上传 APK。WSL 内需要 GitHub CLI：`./wsl-scripts/init-android-env.sh --install-gh` 安装后 `gh auth login` 登录（也可复用 Git Credential Manager 中的 github.com 凭据免交互登录，详见 `wsl-scripts/README.md`）。
+
 `local.properties` 的 `sdk.dir` 只能保存一个系统路径；WSL 与 Windows 脚本都会在构建时自动重写为本系统的路径，两边轮换构建可自愈。
 
 ### 构建代理说明
@@ -240,7 +243,21 @@ git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/bin/git-
 
 在 WSL2 NAT 网络模式下 `127.0.0.1` 指向虚拟机自身，`wsl-scripts/` 会自动探测可用代理（127.0.0.1 → 宿主机网关 → 直连），并写入限域于 Linux + 本项目的 `$GRADLE_USER_HOME/init.d/anisubroid-wsl-proxy.gradle` 覆盖配置，无需改动已提交的 `gradle.properties`。
 
+### Debug 签名说明
+
+仓库提交了共享 Debug keystore `.local-signing/debug.keystore`（位于仓库根目录的隐藏目录内），`scripts/`、`mac-scripts/`、`wsl-scripts/` 三套构建脚本检测到它都会自动用于签名。任意设备构建出的 `app-debug.apk` 签名一致，可互相覆盖安装且保留应用数据。`.gitignore` 中的 `*.keystore` 规则仅用于防止其他密钥被误提交；正式签名密钥不要提交进仓库。
+
 ## 3. 迭代日志
+
+### 2026-10-08
+
+- 「种子下载」更名为「种子条目」，移至导航首位并设为默认首页；订阅条目操作改为「种子 / 视频」按钮，删除移至条目右上角 `×`。
+- 新增视频页：右上角「设置」可关联本地视频文件夹（支持手动输入路径或系统选择器），按订阅名匹配文件夹中的已下载视频；条目复用字幕匹配式操作（候选字幕匹配、偏移、播放、删除），匹配结果本地缓存，进入时先渲染缓存再后台刷新。
+- 种子条目列表与视频页均支持本地缓存；右上角刷新按钮合并展示「刷新中… / 刷新失败」状态并可确认重试。
+- 视频页字幕匹配改为候选模式：多个候选字幕时弹窗手动选择。
+- 仓库提交共享 Debug keystore `.local-signing/debug.keystore`，多设备构建签名统一、可互覆盖安装。
+- WSL 脚本新增 `--install-gh` 安装 GitHub CLI，`release-git.sh --create-github-release` 支持创建 GitHub Release 并上传 APK。
+- 发布 v1.1.1（versionCode 14）。
 
 ### 2026-05-12
 
