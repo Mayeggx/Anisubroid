@@ -39,6 +39,7 @@ Anisubroid/
 │       └── test/                        # 单元测试
 ├── scripts/                             # Windows PowerShell / Batch 构建与发布脚本
 ├── mac-scripts/                         # macOS Shell 构建与 Git 发布脚本
+├── wsl-scripts/                         # WSL Shell 构建、调试与 Git 发布脚本(复用宿主环境)
 ├── artwork/                             # 图标预览素材
 ├── build.gradle.kts                     # 根插件版本
 ├── settings.gradle.kts                  # 单模块 :app 配置
@@ -166,9 +167,78 @@ app\build\outputs\apk\debug\app-debug.apk
 
 Windows 发布使用 `scripts/release.ps1`，支持版本更新、构建、归档 APK、Git commit/tag/push，以及可选 GitHub Release 上传。发布脚本会产生本地 Git 与远端发布副作用，执行前应确认版本号、分支与远端仓库。
 
+### 2.3 WSL 构建（复用 Windows 环境）
+
+WSL 脚本位于 `wsl-scripts/`，用于在 WSL2（已在 Ubuntu-24.04 验证）中直接构建本仓库。设计上尽量复用宿主环境，首次初始化仅需约 250MB 下载：
+
+- 宿主机 SDK（`/mnt/e/Android/Sdk`）的 `platforms/`、`licenses/` 直接共享；Linux 版 `build-tools`、`platform-tools` 二进制由脚本合并进同一目录，与 Windows 的 `.exe` 共存
+- Windows 的 Gradle 依赖缓存（`E:\Gradle\user-home/caches/modules-2`）一次性快照拷贝到 `~/.gradle`，不重新下载依赖
+- 唯一必须安装的是 Linux JDK（apt 安装 `openjdk-17-jdk-headless`）
+
+详细说明与共享原理见 `wsl-scripts/README.md`。
+
+#### 初始化环境
+
+在 WSL 中进入项目根目录（如 `/mnt/e/Mega/Anisubroid`）执行：
+
+```sh
+./wsl-scripts/init-android-env.sh --install-jdk --accept-licenses
+```
+
+JDK 已安装时可省略 `--install-jdk`。不想往宿主 SDK 写入文件时，可用 `ANDROID_SDK_ROOT=$HOME/Android/Sdk` 走独立 SDK 完整安装（约 340MB）。
+
+初始化完成后检查环境：
+
+```sh
+./wsl-scripts/check-android-env.sh --strict
+```
+
+#### 构建、测试与 ADB 调试
+
+```sh
+# 构建 Debug APK
+./wsl-scripts/build-debug.sh
+
+# 构建失败时持续自动重试,日志输出至 build/reports/wsl-build-retries/
+./wsl-scripts/build-debug-until-success.sh
+
+# 运行 Debug 单元测试
+./wsl-scripts/test-debug.sh
+
+# 安装 APK、启动应用并导出 logcat(自动选择 Linux adb 或 Windows adb.exe)
+./wsl-scripts/start-adb-debug.sh
+```
+
+APK 输出：
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+USB 设备默认归 Windows 管理：Linux adb 找不到设备时脚本自动回退 `adb.exe` 经 interop 调用；想在 WSL 内直连 USB 需用 `usbipd` 附加设备。
+
+#### Git 发布
+
+`wsl-scripts/release-git.sh` 与 macOS 版本行为一致。先 dry-run 预演：
+
+```sh
+./wsl-scripts/release-git.sh --version-name "1.1.1" --dry-run
+./wsl-scripts/release-git.sh --version-name "1.1.1"
+```
+
+WSL 内 Git 身份与凭据独立于 Windows，首次发布前需配置 `user.name`/`user.email`；HTTPS 推送可复用 Windows 的 Git Credential Manager：
+
+```sh
+git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe"
+```
+
+`local.properties` 的 `sdk.dir` 只能保存一个系统路径；WSL 与 Windows 脚本都会在构建时自动重写为本系统的路径，两边轮换构建可自愈。
+
 ### 构建代理说明
 
 根目录 `gradle.properties` 固定设置了 Gradle HTTP/HTTPS 代理 `127.0.0.1:7897`。首次下载 Gradle、Android SDK 或 Maven 依赖时，需确保该代理可用；不使用该代理时，应修改或移除对应的 `systemProp.*proxy*` 配置。
+
+在 WSL2 NAT 网络模式下 `127.0.0.1` 指向虚拟机自身，`wsl-scripts/` 会自动探测可用代理（127.0.0.1 → 宿主机网关 → 直连），并写入限域于 Linux + 本项目的 `$GRADLE_USER_HOME/init.d/anisubroid-wsl-proxy.gradle` 覆盖配置，无需改动已提交的 `gradle.properties`。
 
 ## 3. 迭代日志
 

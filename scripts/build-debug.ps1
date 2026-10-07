@@ -6,10 +6,8 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 $localPropertiesPath = Join-Path $projectRoot "local.properties"
 $apkPath = Join-Path $projectRoot "app\build\outputs\apk\debug\app-debug.apk"
 
-if (-not (Test-Path $localPropertiesPath)) {
-    "sdk.dir=$($env:ANDROID_HOME -replace '\\','\\')" | Set-Content -Encoding UTF8 $localPropertiesPath
-    Write-Output "Created local.properties at $localPropertiesPath"
-}
+"sdk.dir=$($env:ANDROID_HOME -replace '\\','\\')" | Set-Content -Encoding UTF8 $localPropertiesPath
+Write-Output "local.properties sdk.dir=$env:ANDROID_HOME"
 
 Push-Location $projectRoot
 try {
